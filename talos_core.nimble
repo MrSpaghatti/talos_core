@@ -31,3 +31,4 @@ task test, "Run all tests":
   exec "nim c -d:ssl -r tests/test_mcp_tool.nim"
   exec "nim c -d:ssl -r tests/test_persona.nim"
   exec "nim c -d:ssl --threads:on -r tests/test_daemon_delegation.nim"
+  exec "nim c -d:ssl --threads:on -r tests/test_plan_executor.nim"

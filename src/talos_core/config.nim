@@ -528,24 +528,28 @@ proc loadConfig*(
       try:
         result.maxTokens = parseInt(val)
       except ValueError:
-        discard
+        raise newException(ConfigError,
+          "TALOS_MAX_TOKENS must be an integer, got: " & val)
     of "TALOS_TEMPERATURE":
       try:
         result.temperature = parseFloat(val)
       except ValueError:
-        discard
+        raise newException(ConfigError,
+          "TALOS_TEMPERATURE must be a float, got: " & val)
     of "TALOS_MAX_LOOP_ITERATIONS":
       try:
         result.maxLoopIterations = parseInt(val)
       except ValueError:
-        discard
+        raise newException(ConfigError,
+          "TALOS_MAX_LOOP_ITERATIONS must be an integer, got: " & val)
     of "TALOS_DB_PATH":
       result.dbPath = val
     of "TALOS_WEB_PORT":
       try:
         result.webPort = parseInt(val)
       except ValueError:
-        discard
+        raise newException(ConfigError,
+          "TALOS_WEB_PORT must be an integer, got: " & val)
     of "MERCURY_PROVIDER":
       stderr.writeLine("Warning: MERCURY_PROVIDER in .env is deprecated, use TALOS_PROVIDER instead")
       result.provider = val

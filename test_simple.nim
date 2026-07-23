@@ -1,4 +1,4 @@
-import mercury_core/llm_client
+import talos_core/llm_client
 import std/json
 
 let client = newLLMClient(

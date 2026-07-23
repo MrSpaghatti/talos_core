@@ -350,9 +350,10 @@ proc listSessions*(m: Memory; limit: int = 50): seq[SessionSummary] =
   ## Returns the most recently updated sessions, up to `limit`.
   result = @[]
   for row in m.db.fastRows(sql"""
-    SELECT s.id, s.created_at, s.updated_at,
-           (SELECT COUNT(*) FROM messages ms WHERE ms.session_id = s.id)
+    SELECT s.id, s.created_at, s.updated_at, COUNT(m.id) as msg_count
     FROM sessions s
+    LEFT JOIN messages m ON m.session_id = s.id
+    GROUP BY s.id, s.created_at, s.updated_at
     ORDER BY s.updated_at DESC
     LIMIT ?
   """, $limit):

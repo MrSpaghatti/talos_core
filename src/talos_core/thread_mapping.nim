@@ -78,7 +78,7 @@ proc getSessionForThread*(db: DbConn; threadId: string): Option[string] =
   let row = db.getRow(sql"""
     SELECT session_id FROM discord_threads WHERE thread_id = ?
   """, threadId)
-  if row[0].len == 0:
+  if row.len == 0 or row[0].len == 0:
     return none[string]()
   return some(row[0])
 
@@ -102,7 +102,7 @@ proc getLatestSessionForChannel*(db: DbConn; channelId: string): Option[string] 
     ORDER BY last_active_at DESC
     LIMIT 1
   """, channelId)
-  if row[0].len > 0:
+  if row.len > 0 and row[0].len > 0:
     return some(row[0])
   # Fall back to archived
   let archivedRow = db.getRow(sql"""
@@ -111,6 +111,6 @@ proc getLatestSessionForChannel*(db: DbConn; channelId: string): Option[string] 
     ORDER BY last_active_at DESC
     LIMIT 1
   """, channelId)
-  if archivedRow[0].len > 0:
+  if archivedRow.len > 0 and archivedRow[0].len > 0:
     return some(archivedRow[0])
   return none[string]()

@@ -342,7 +342,7 @@ proc chatCompletion*(
     except NetworkError as e:
       lastErr = e
       if attempt < client.maxRetries:
-        sleep(client.retryBackoffMs * (1 shl (attempt - 1)))
+        sleep(client.retryBackoffMs * (1 shl min(attempt - 1, 30)))
         continue
       raise e
 
@@ -352,7 +352,7 @@ proc chatCompletion*(
     # Retry on 429 and 5xx
     if (status == 429 or (status >= 500 and status < 600)) and
        attempt < client.maxRetries:
-      sleep(client.retryBackoffMs * (1 shl (attempt - 1)))
+      sleep(client.retryBackoffMs * (1 shl min(attempt - 1, 30)))
       continue
 
     raiseForStatus(status, respBody)
@@ -502,7 +502,9 @@ proc chatCompletionStream*(
   let host = parsed.hostname
   let useSsl = parsed.scheme == "https"
   let portNum =
-    if parsed.port.len > 0: parseInt(parsed.port)
+    if parsed.port.len > 0:
+      try: parseInt(parsed.port)
+      except ValueError: raise newException(LLMError, "Invalid port in URL: " & parsed.port)
     elif useSsl: 443
     else: 80
   let path =

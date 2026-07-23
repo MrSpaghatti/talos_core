@@ -6,7 +6,7 @@
 ##
 ## One connection at a time, synchronous, thread-based.
 
-import std/[net, strutils, locks]
+import std/[net, strutils, locks, threadpool]
 import talos_core/llm_client
 
 type

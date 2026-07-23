@@ -21,9 +21,8 @@
 ##      token counts reported by the LLM.
 ##
 ## Out of scope (deferred):
-##   - Plan-Execute
+##   - Plan-Execute (implemented in `plan_executor.nim`)
 ##   - Reflection / self-critique
-##   - Streaming responses
 ##   - Vector memory / semantic retrieval
 
 import std/[json, strutils, tables]
@@ -343,10 +342,14 @@ proc runAgentLoop*(
     # always send the tool results back at least once before bailing.
     if detectLoop(toolCallHistory, loopThreshold):
       let stopText =
-        "Loop detected: tool '" &
-        resp.toolCalls[^1].name &
-        "' was called " & $loopThreshold &
-        " times with identical arguments. Stopping."
+        if resp.toolCalls.len > 0:
+          "Loop detected: tool '" &
+          resp.toolCalls[^1].name &
+          "' was called " & $loopThreshold &
+          " times with identical arguments. Stopping."
+        else:
+          "Loop detected: a tool was called " & $loopThreshold &
+          " times with identical arguments. Stopping."
       let stopMsg = ChatMessage(role: crAssistant, content: stopText)
       memory.appendMessage(sid, stopMsg)
       result.text = stopText
