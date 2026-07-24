@@ -114,12 +114,15 @@ proc nowIso(): string =
   let t = now().utc
   return t.format("yyyy-MM-dd'T'HH:mm:ss'Z'")
 
-proc generateSessionId(): string =
+proc generateSessionId(salt: int = 0): string =
   ## Generates a session ID based on the current UTC timestamp plus a
-  ## nanosecond component for uniqueness.
+  ## nanosecond component for uniqueness. `salt`, when non-zero, adds a
+  ## disambiguating suffix for retrying after a collision (see newSession).
   let t = now().utc
-  return "sess_" & t.format("yyyyMMdd'T'HHmmss") & "_" &
-         $getTime().nanosecond
+  result = "sess_" & t.format("yyyyMMdd'T'HHmmss") & "_" &
+           $getTime().nanosecond
+  if salt > 0:
+    result.add("_" & $salt)
 
 # ---------------------------------------------------------------------------
 # Schema initialisation
@@ -212,20 +215,32 @@ proc close*(m: var Memory) =
 # Public API
 # ---------------------------------------------------------------------------
 
+proc hasSession*(m: Memory; sessionId: string): bool =
+  ## True if a session row with this ID already exists.
+  let row = m.db.getRow(sql"SELECT id FROM sessions WHERE id = ?", sessionId)
+  row[0].len > 0
+
 proc newSession*(m: Memory; metadata: string = "{}"): string =
-  ## Creates a new session row and returns its ID.
-  let id = generateSessionId()
+  ## Creates a new session row and returns its ID. Retries with a
+  ## disambiguating suffix on the rare chance generateSessionId() collides
+  ## with an existing row (e.g. two calls within the same clock tick on a
+  ## system with coarse timer resolution) — sessions.id is a bare PRIMARY
+  ## KEY with no dedupe otherwise, and a collision would raise an uncaught
+  ## UNIQUE constraint DbError.
+  var id = generateSessionId()
+  var attempt = 0
+  while m.hasSession(id):
+    inc attempt
+    if attempt > 1000:
+      raise newException(MemoryError,
+        "failed to generate a unique session id after 1000 attempts")
+    id = generateSessionId(attempt)
   let ts = nowIso()
   m.db.exec(sql"""
     INSERT INTO sessions (id, created_at, updated_at, metadata)
     VALUES (?, ?, ?, ?)
   """, id, ts, ts, metadata)
   return id
-
-proc hasSession*(m: Memory; sessionId: string): bool =
-  ## True if a session row with this ID already exists.
-  let row = m.db.getRow(sql"SELECT id FROM sessions WHERE id = ?", sessionId)
-  row[0].len > 0
 
 proc ensureSession*(m: Memory; sessionId: string; metadata: string = "{}") =
   ## Creates a session row with the given ID if one does not already exist.

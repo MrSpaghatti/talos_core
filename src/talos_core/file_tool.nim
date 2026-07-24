@@ -49,7 +49,7 @@ proc fileReadTool*(rules: FileRules): Tool =
 
   result = newTool("file_read", "Read contents of a file", parameters, execute)
 
-proc fileWriteTool*(rules: FileRules, cfg: DiscordConfig, userId: string): Tool =
+proc fileWriteTool*(rules: FileRules, cfg: DiscordConfig): Tool =
   let parameters = %*{
     "type": "object",
     "properties": {
@@ -83,6 +83,7 @@ proc fileWriteTool*(rules: FileRules, cfg: DiscordConfig, userId: string): Tool 
     of pathAsk:
       return ToolResult(output: "Requires approval", isError: true, exitCode: 1)
     of pathAllow:
+      let userId = args{"_callerId"}.getStr("")
       let perm = canUseTool(userId, "file_write", cfg)
       case perm
       of pdDeny:

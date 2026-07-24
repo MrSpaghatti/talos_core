@@ -67,13 +67,13 @@ proc sendWithRetry*[T](
         raise newException(RetryExhaustedError,
           "Rate limit retry exhausted after " & $maxAttempts & " attempts: " & e.msg)
       let delay = if e.retryAfterMs > 0: e.retryAfterMs
-                  else: baseDelayMs * (1 shl (attempt - 1))
+                  else: baseDelayMs * (1 shl min(attempt - 1, 30))
       await slp(delay)
     except ServerError as e:
       if attempt >= maxAttempts:
         raise newException(RetryExhaustedError,
           "Server error retry exhausted after " & $maxAttempts & " attempts: " & e.msg)
-      let delay = baseDelayMs * (1 shl (attempt - 1))
+      let delay = baseDelayMs * (1 shl min(attempt - 1, 30))
       await slp(delay)
 
   raise newException(RetryExhaustedError,

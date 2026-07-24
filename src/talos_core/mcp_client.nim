@@ -153,16 +153,22 @@ proc callMethod*(client: McpClient; mcpMethod: string; params: JsonNode = nil): 
     err.serverUrl = client.cfg.url
     raise err
 
-  # Check for JSON-RPC error response.
+  # Check for JSON-RPC error response. Per spec `error` should always be an
+  # object, but a malformed/malicious server could send a bare string or
+  # other non-object value — guard against that before calling `.hasKey`/
+  # indexing into it, which otherwise raises an uncatchable AssertionDefect.
   if respNode.kind == JObject and respNode.hasKey("error"):
-    let errMsg = if respNode["error"].hasKey("message"):
-      respNode["error"]["message"].getStr()
-    else:
-      "unknown JSON-RPC error"
-    let errCode = if respNode["error"].hasKey("code"):
-      respNode["error"]["code"].getInt()
-    else:
-      -1
+    let errNode = respNode["error"]
+    let errMsg =
+      if errNode.kind == JObject and errNode.hasKey("message"):
+        errNode["message"].getStr()
+      else:
+        "malformed JSON-RPC error object: " & $errNode
+    let errCode =
+      if errNode.kind == JObject and errNode.hasKey("code"):
+        errNode["code"].getInt()
+      else:
+        -1
     var err = newException(McpProtocolError,
       "MCP server '" & client.cfg.url &
       "' returned JSON-RPC error [" & $errCode & "]: " & errMsg)

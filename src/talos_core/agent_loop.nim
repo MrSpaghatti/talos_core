@@ -76,6 +76,11 @@ type
       ## expires after ~10s) to refresh it once per turn. Since each turn
       ## blocks synchronously on the LLM call, this can't fire *during*
       ## a single slow call — only between turns.
+    callerId*: string
+      ## Real caller identity for this run (e.g. Discord author id), if
+      ## known. Injected into tool-call args as `_callerId` before
+      ## execution so tools that need per-caller permission checks (e.g.
+      ## file_write) can see the actual requester. Empty for CLI/web runs.
 
   AgentStats* = object
     ## Counters returned alongside the agent response, useful for tests
@@ -184,10 +189,17 @@ proc formatToolResult(res: ToolResult): string =
 proc executeToolCall(
     reg: ToolRegistry;
     tc: ToolCall;
+    callerId: string;
 ): ToolResult =
   ## Runs a single tool call. The registry already converts arbitrary
   ## exceptions into `ToolResult{isError:true}`, so the only case we have
   ## to handle here is a tool that is not registered at all.
+  ##
+  ## Injects the run's `callerId` (if any) into the parsed arguments as a
+  ## reserved `_callerId` key before execution, so tools that need real
+  ## per-caller identity (e.g. file_write's permission check) can read it
+  ## out of `args` instead of relying on a value baked in at tool
+  ## construction time.
   if reg.isNil:
     return ToolResult(
       output: "no tool registry configured",
@@ -200,7 +212,17 @@ proc executeToolCall(
       isError: true,
       exitCode: -1,
     )
-  reg.execute(tc.name, tc.arguments)
+  var argsNode: JsonNode
+  try:
+    argsNode = parseArguments(tc.arguments)
+  except ToolArgumentError as e:
+    return ToolResult(
+      output: "invalid arguments for tool '" & tc.name & "': " & e.msg,
+      isError: true,
+      exitCode: -1,
+    )
+  argsNode["_callerId"] = %callerId
+  reg.execute(tc.name, argsNode)
 
 # ---------------------------------------------------------------------------
 # Main loop
@@ -328,7 +350,7 @@ proc runAgentLoop*(
       inc result.stats.toolCallsMade
       toolCallHistory.add(toolCallSignature(tc))
 
-      let toolRes = executeToolCall(registry, tc)
+      let toolRes = executeToolCall(registry, tc, agentCfg.callerId)
       let toolMsg = ChatMessage(
         role: crTool,
         name: tc.name,

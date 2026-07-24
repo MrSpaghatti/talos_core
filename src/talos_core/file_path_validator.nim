@@ -19,7 +19,7 @@ type
     askPatterns*: seq[string]
     denyPatterns*: seq[string]
 
-const mandatoryDenyPatterns = @[
+const mandatoryDenyPatterns* = @[
   ".env", ".env.*", "*.key", "*.pem", "*/.ssh/*", ".ssh/*", "*/.aws/*", ".aws/*", "*/.gnupg/*", ".gnupg/*"
 ]
 
@@ -48,13 +48,23 @@ proc resolvePathSafe*(path: string): string =
     
   return normalizedPath(current)
 
+proc globToRegex(pattern: string): string =
+  ## Converts a glob pattern to an anchored regex, escaping every
+  ## non-wildcard character so regex metacharacters in the pattern
+  ## (`+ ^ $ [ ] ( ) | \` etc.) are matched literally rather than
+  ## interpreted as regex syntax.
+  result = "^"
+  for c in pattern:
+    case c
+    of '*': result.add(".*")
+    of '?': result.add(".")
+    else: result.add(escapeRe($c))
+  result.add("$")
+
 proc matchPattern(path: string, pattern: string): bool =
   # Simple glob matching
   try:
-    # Convert glob to regex
-    var rePattern = pattern.replace(".", "\\.").replace("*", ".*").replace("?", ".")
-    rePattern = "^" & rePattern & "$"
-    let r = re(rePattern)
+    let r = re(globToRegex(pattern))
     return path.match(r)
   except RegexError:
     return false
@@ -68,10 +78,19 @@ proc matchAnyPattern(path: string, patterns: seq[string]): bool =
     # Also check if it's a directory match like .ssh/*
     if p.endsWith("/*"):
       let prefix = p[0..^3]
-      if path.contains("/" & prefix & "/") or path.contains("\\" & prefix & "\\"):
-        return true
-      if path.startsWith(prefix & "/") or path.startsWith(prefix & "\\"):
-        return true
+      if prefix.startsWith("/"):
+        # Absolute-style pattern: only match under that exact directory
+        # (the old `path.contains("/" & prefix & "/")` branch produced an
+        # unreachable literal "//..." here and never matched anything).
+        if path == prefix or path.startsWith(prefix & "/"):
+          return true
+      else:
+        # Bare/relative directory name: match wherever it occurs as a
+        # complete path segment (e.g. ".ssh/*" catching both "~/.ssh/id_rsa"
+        # and "/some/project/.ssh/config") — same "match anywhere" semantics
+        # `mandatoryDenyPatterns` already relies on for defense in depth.
+        if path.startsWith(prefix & "/") or path.contains("/" & prefix & "/"):
+          return true
   return false
 
 proc validatePath*(path: string, rules: FileRules): ValidationResult =

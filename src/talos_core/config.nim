@@ -10,7 +10,7 @@
 ##   TALOS_PROVIDER, TALOS_VLLM_ENDPOINT, TALOS_OPENROUTER_ENDPOINT,
 ##   TALOS_OPENROUTER_MODEL, TALOS_VLLM_MODEL, TALOS_MAX_TOKENS,
 ##   TALOS_TEMPERATURE, TALOS_MAX_LOOP_ITERATIONS, TALOS_DB_PATH,
-##   OPENROUTER_API_KEY
+##   TALOS_FILE_SANDBOX_DIR, OPENROUTER_API_KEY
 
 import std/[os, parsecfg, strutils, streams]
 import discord_types
@@ -241,6 +241,7 @@ proc applyTomlSection(cfg: var TalosConfig; section, key, val: string) =
     case k
     of "allow": cfg.discord.fileRules.allow = parseCsvList(val)
     of "deny": cfg.discord.fileRules.deny = parseCsvList(val)
+    of "sandbox_dir": cfg.discord.fileSandboxDir = val
     else: discard
   of "discord.tools":
     case k
@@ -437,6 +438,10 @@ proc applyEnvVars(cfg: var TalosConfig) =
   if apiKey.len > 0:
     cfg.openrouterApiKey = apiKey
 
+  let fileSandboxDir = getEnv("TALOS_FILE_SANDBOX_DIR")
+  if fileSandboxDir.len > 0:
+    cfg.discord.fileSandboxDir = fileSandboxDir
+
   let webPortStr = getEnv("TALOS_WEB_PORT")
   if webPortStr.len > 0:
     try:
@@ -477,6 +482,9 @@ proc validate*(cfg: TalosConfig) =
     raise newException(ConfigError, "openrouter_endpoint must not be empty")
   if cfg.dbPath.len == 0:
     raise newException(ConfigError, "db_path must not be empty")
+  if cfg.webPort <= 0 or cfg.webPort > 65535:
+    raise newException(ConfigError,
+      "web_port must be between 1 and 65535, got: " & $cfg.webPort)
 
   # Warn if OpenRouter is selected but no API key is configured.
   if cfg.provider == "openrouter" and cfg.openrouterApiKey.len == 0:

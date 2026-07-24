@@ -45,6 +45,20 @@ proc chunkMessage*(content: string; maxLen = 1900): seq[string] =
       var room = roomLeft()
       if room <= 0:
         flushCurrent()
+        if roomLeft() <= 0:
+          # Even a freshly-started chunk leaves no room (e.g. a fence
+          # opener line alone is already too long to fit before
+          # FenceCloseReserve). Repeating flushCurrent() would just
+          # re-emit the same oversized chunk forever, so give up on
+          # fence-awareness for the rest of this message — maxLen > 0 is
+          # guaranteed by the guard at the top of chunkMessage, so a bare
+          # empty chunk always has room — and force at least one
+          # character through now to guarantee forward progress.
+          inFence = false
+          fenceOpener = ""
+          current = ""
+          current.add remaining[0]
+          remaining = remaining[1 .. ^1]
         continue
 
       if remaining.len <= room:
@@ -53,6 +67,12 @@ proc chunkMessage*(content: string; maxLen = 1900): seq[string] =
       else:
         if room <= ContinuationMarker.len:
           flushCurrent()
+          if roomLeft() <= ContinuationMarker.len:
+            # maxLen itself is too small to ever fit a continuation
+            # marker, even in a fresh chunk — force one character through
+            # so this can't loop forever either.
+            current.add remaining[0]
+            remaining = remaining[1 .. ^1]
           continue
         let take = room - ContinuationMarker.len
         current.add remaining[0 ..< take]

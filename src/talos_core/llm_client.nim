@@ -426,6 +426,16 @@ proc fillMore(r: var BodyReader) =
       except ValueError:
         r.eof = true
         return
+      if size < 0:
+        # parseHexInt silently overflows to a negative value for an
+        # oversized/adversarial chunk-size line (e.g. "ffffffffffffffff")
+        # instead of raising. Treat that the same as a malformed size —
+        # otherwise chunkRemaining goes negative, the read loop below never
+        # runs, and the code would go on to consume the next real line of
+        # the stream as if it were this chunk's trailing CRLF, silently
+        # desyncing the parser.
+        r.eof = true
+        return
       if size == 0:
         # Terminal chunk: consume optional trailer headers up to the
         # final blank line, then signal end of body.
@@ -568,7 +578,7 @@ proc chatCompletionStream*(
   let chunked = "chunked" in headers.getOrDefault("transfer-encoding", "").toLowerAscii()
   var reader = BodyReader(sock: sock, chunked: chunked, timeoutMs: client.timeoutMs)
 
-  if status != 200:
+  if not (status >= 200 and status < 300):
     # Read error body
     var errBody = ""
     try:

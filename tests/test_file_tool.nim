@@ -62,24 +62,24 @@ suite "File Tool":
 
   test "fileWriteTool admin can write to allowed path":
     let path = sandboxDir / "test.txt"
-    let t = fileWriteTool(rules, cfg, "admin")
-    let args = %*{"path": path, "content": "hello admin"}
+    let t = fileWriteTool(rules, cfg)
+    let args = %*{"path": path, "content": "hello admin", "_callerId": "admin"}
     let res = t.execute(args)
     check res.isError == false
     check readFile(path) == "hello admin"
 
   test "fileWriteTool normal user gets ask on allowed path":
     let path = sandboxDir / "test2.txt"
-    let t = fileWriteTool(rules, cfg, "user")
-    let args = %*{"path": path, "content": "hello user"}
+    let t = fileWriteTool(rules, cfg)
+    let args = %*{"path": path, "content": "hello user", "_callerId": "user"}
     let res = t.execute(args)
     check res.isError == true
     check res.output == "Requires approval"
 
   test "fileWriteTool deny":
     let path = sandboxDir / "test.secret"
-    let t = fileWriteTool(rules, cfg, "admin")
-    let args = %*{"path": path, "content": "atomic"}
+    let t = fileWriteTool(rules, cfg)
+    let args = %*{"path": path, "content": "atomic", "_callerId": "admin"}
     let res = t.execute(args)
     check res.isError == true
     check res.output.contains("Access denied")
@@ -91,8 +91,8 @@ suite "File Tool":
     var denyCfg = cfg
     denyCfg.tools.deny.add("file_write")
     let path = sandboxDir / "denied.txt"
-    let t = fileWriteTool(rules, denyCfg, "admin")
-    let args = %*{"path": path, "content": "should not be written"}
+    let t = fileWriteTool(rules, denyCfg)
+    let args = %*{"path": path, "content": "should not be written", "_callerId": "admin"}
     let res = t.execute(args)
     check res.isError == true
     check res.output.contains("Access denied")
@@ -100,9 +100,9 @@ suite "File Tool":
 
   test "fileWriteTool size limit":
     let path = sandboxDir / "big.txt"
-    let t = fileWriteTool(rules, cfg, "admin")
+    let t = fileWriteTool(rules, cfg)
     let bigContent = newString(1024 * 1024 * 2) # 2MB
-    let args = %*{"path": path, "content": bigContent}
+    let args = %*{"path": path, "content": bigContent, "_callerId": "admin"}
     let res = t.execute(args)
     check res.isError == true
     check res.output.contains("exceeds")

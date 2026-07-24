@@ -3,6 +3,7 @@
 import std/[os, unittest, strutils]
 import talos_core/config
 import talos_core/discord_types
+import talos_core/file_path_validator
 
 proc writeTempFile(path, content: string) =
   createDir(parentDir(path))
@@ -18,7 +19,8 @@ suite "Discord Config Defaults":
     check cfg.discord.users.allow.len == 0
     check cfg.discord.users.deny.len == 0
     check cfg.discord.fileRules.allow.len == 0
-    check cfg.discord.fileRules.deny == @[".env", ".ssh", ".aws", ".gnupg", "*.key", "*.pem"]
+    check cfg.discord.fileRules.deny == mandatoryDenyPatterns
+    check cfg.discord.fileSandboxDir == ""
     check cfg.discord.tools.allow.len == 0
     check cfg.discord.tools.deny.len == 0
 
@@ -63,3 +65,20 @@ deny = ".env, secret.key"
     let cfg = loadConfig(configPath = cfgFile, envFilePath = "/nonexistent/.env")
     check cfg.discord.fileRules.allow == @["*.txt", "*.md"]
     check cfg.discord.fileRules.deny == @[".env", "secret.key"]
+
+  test "parses [discord.file_rules] sandbox_dir (opt-in, unset by default)":
+    let cfgFile = tmpDir / "config.toml"
+    writeTempFile(cfgFile, """
+[discord.file_rules]
+sandbox_dir = "/some/project"
+""")
+    let cfg = loadConfig(configPath = cfgFile, envFilePath = "/nonexistent/.env")
+    check cfg.discord.fileSandboxDir == "/some/project"
+
+  test "TALOS_FILE_SANDBOX_DIR env var overrides sandbox_dir":
+    let cfgFile = tmpDir / "config.toml"
+    writeTempFile(cfgFile, "")
+    putEnv("TALOS_FILE_SANDBOX_DIR", "/env/project")
+    defer: delEnv("TALOS_FILE_SANDBOX_DIR")
+    let cfg = loadConfig(configPath = cfgFile, envFilePath = "/nonexistent/.env")
+    check cfg.discord.fileSandboxDir == "/env/project"

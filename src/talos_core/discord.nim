@@ -110,6 +110,7 @@ proc onMessageCreate*(bot: DiscordBot; msg: discord_mocks.Message) {.async, gcsa
       sessionId: existingThreadSession.get(),
       channelId: msg.channel_id,
       threadId: msg.channel_id,
+      userId: msg.author.id,
     )
     await bot.dispatcher.dispatchAgent(request)
     return
@@ -131,6 +132,7 @@ proc onMessageCreate*(bot: DiscordBot; msg: discord_mocks.Message) {.async, gcsa
       sessionId: sessionId,
       channelId: threadId,
       threadId: threadId,
+      userId: msg.author.id,
     )
     await bot.dispatcher.dispatchAgent(request)
     return
@@ -146,6 +148,7 @@ proc onMessageCreate*(bot: DiscordBot; msg: discord_mocks.Message) {.async, gcsa
     sessionId: newSessionId,
     channelId: threadId,
     threadId: threadId,
+    userId: msg.author.id,
   )
   await bot.dispatcher.dispatchAgent(request)
 

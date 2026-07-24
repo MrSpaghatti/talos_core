@@ -1,5 +1,7 @@
 ## Discord configuration types.
 
+import file_path_validator
+
 type
   AccessControl* = object
     allow*: seq[string]
@@ -11,6 +13,9 @@ type
     admins*: AccessControl
     users*: AccessControl
     fileRules*: AccessControl
+    fileSandboxDir*: string  ## Optional: confines file_read/file_write to this
+                             ## directory (and its descendants) when set. Empty
+                             ## by default — purely opt-in, no forced default.
     tools*: AccessControl
     daemonDelegation*: bool  ## Enable agent delegation and MCP tools in daemon mode
 
@@ -20,7 +25,11 @@ proc defaultDiscordConfig*(): DiscordConfig =
     prefix: "!",
     admins: AccessControl(allow: @[], deny: @[]),
     users: AccessControl(allow: @[], deny: @[]),
-    fileRules: AccessControl(allow: @[], deny: @[".env", ".ssh", ".aws", ".gnupg", "*.key", "*.pem"]),
+    # The mandatory deny patterns (file_path_validator.mandatoryDenyPatterns)
+    # are always enforced independently of this list — this is just a
+    # sensible starting default for the user-configurable deny list.
+    fileRules: AccessControl(allow: @[], deny: mandatoryDenyPatterns),
+    fileSandboxDir: "",
     tools: AccessControl(allow: @[], deny: @[]),
     daemonDelegation: false
   )

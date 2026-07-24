@@ -18,6 +18,9 @@ type
     sessionId*: string
     channelId*: string
     threadId*: string
+    userId*: string  ## Real caller identity (e.g. Discord author id), threaded
+                      ## through to AgentConfig.callerId for per-call permission
+                      ## checks (see file_tool.fileWriteTool).
 
   AgentResult* = object
     responseText*: string
@@ -76,6 +79,7 @@ proc dispatchAgent*(dispatcher: AgentDispatcher; request: AgentRequest): Future[
         var mem = newMemory(dispatcher.dbPath)
         defer: mem.close()
         var agentCfg = newAgentConfig(dispatcher.cfg)
+        agentCfg.callerId = request.userId
         if dispatcher.turnCallback != nil:
           let channelId = request.channelId
           let cb = dispatcher.turnCallback

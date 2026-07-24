@@ -34,3 +34,25 @@ suite "chunkMessage":
       if chunk.contains("..."):
         sawContinuation = true
     check sawContinuation
+
+  test "terminates (does not hang) when a fence opener alone leaves no room":
+    # Regression: a fence-opening line long enough that even a freshly
+    # reopened chunk has no room before FenceCloseReserve used to loop
+    # forever, reachable at the default maxLen=1900 both real call sites
+    # (discord.nim, talos_agent.nim) use.
+    let longFence = "```" & "x".repeat(1897)
+    let content = longFence & "\n" & "some code\n" & "more code\n" & "```\n"
+    let chunks = chunkMessage(content, maxLen = 1900)
+    check chunks.len > 0
+    for chunk in chunks:
+      check chunk.len <= 1900
+
+  test "terminates (does not hang) when maxLen is smaller than the continuation marker":
+    # Regression: maxLen <= ContinuationMarker.len used to loop forever
+    # for any sufficiently long fragment.
+    let chunks = chunkMessage("a".repeat(20), maxLen = 2)
+    check chunks.len > 0
+    var total = 0
+    for chunk in chunks:
+      total += chunk.len
+    check total > 0

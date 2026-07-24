@@ -90,17 +90,22 @@ proc registerMcpTools*(
     reg: ToolRegistry;
     mcpTools: seq[McpTool];
     client: McpClient;
-) =
+): seq[McpTool] {.discardable.} =
   ## Registers all `McpTool` objects into a `ToolRegistry`. Uses the same
   ## `McpClient` for all tools (assumes they come from the same server).
+  ## Returns the subset of `mcpTools` that were actually registered —
+  ## distinct from `mcpTools` itself if registration stops partway.
   ##
-  ## Skips any tool whose name collides with an already-registered tool
-  ## (raises `ToolDuplicateError` only on the first collision).
+  ## Raises `ToolDuplicateError` on the first name collision with an
+  ## already-registered tool; anything registered before that point is
+  ## still reflected in the return value.
+  result = @[]
   for tool in mcpTools:
     if reg.has(tool.name):
       raise newException(ToolDuplicateError,
         "tool '" & tool.name & "' already registered; cannot add from MCP")
     registerMcpTool(reg, tool, client)
+    result.add(tool)
 
 # ---------------------------------------------------------------------------
 # Convenience: build and register from server configs in one shot
@@ -122,8 +127,12 @@ proc registerMcpServer*(
   try:
     discard client.initialize()
     let tools = client.listTools()
-    result = tools
-    registerMcpTools(reg, tools, client)
+    # `result` reflects tools actually registered, not merely discovered —
+    # if registerMcpTools raises partway (e.g. a name collision), only the
+    # tools registered before that point are included, so the `result.len
+    # == 0` check below correctly detects "nothing holds a reference to
+    # this client" and the reported count downstream isn't inflated.
+    result = registerMcpTools(reg, tools, client)
     # Keep client alive — its HttpClient is used by each tool's execute proc.
   except CatchableError as e:
     if result.len == 0:

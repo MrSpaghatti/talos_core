@@ -50,7 +50,7 @@ proc canUseTool*(
   # check tool risk
   let risk = getToolRisk(toolName)
 
-  if risk == riskNone or risk == riskLow:
+  if risk == riskLow:
     return pdAllow
 
   if risk == riskMedium:
