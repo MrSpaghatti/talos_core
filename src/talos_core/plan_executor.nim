@@ -378,6 +378,12 @@ proc executePlan*(
           stepCallback(step)
         continue
       try:
+        # NOTE: unlike agent_loop.executeToolCall, this path does NOT
+        # inject the reserved `_callerId` argument — plan mode currently
+        # runs only from the CLI, where no caller identity exists. Anyone
+        # wiring an identity-gated tool (file_write, the gated shell) into
+        # a plan-mode registry must add the injection here first, or those
+        # tools will fail closed for every plan step.
         let toolResult = registry.execute(step.toolName, step.toolArgs)
         if toolResult.isError:
           step.status = ssFailed

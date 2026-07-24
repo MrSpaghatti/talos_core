@@ -59,7 +59,19 @@ proc canUseTool*(
     else:
       return pdAsk
 
-  if risk == riskHigh or risk == riskCritical:
+  if risk == riskHigh:
+    # Same shape as riskMedium but stricter for non-admins: admins get the
+    # tool, everyone else needs approval. Without an admin fast-path here,
+    # gating shell through canUseTool would return pdAsk for every caller
+    # in daemon mode — i.e. disable the tool outright, since there is no
+    # interactive approval flow. Operators who want shell for non-admin
+    # users can still add it to tools.allow explicitly.
+    if isAdmin(userId, cfg):
+      return pdAllow
+    else:
+      return pdAsk
+
+  if risk == riskCritical:
     return pdAsk
 
   return pdDeny

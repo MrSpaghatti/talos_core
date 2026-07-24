@@ -151,8 +151,11 @@ suite "Permission Framework":
   test "canUseTool - riskHigh normal user gets ask":
     check canUseTool("normal_user", "shell", cfg) == pdAsk
 
-  test "canUseTool - riskHigh admin also gets ask":
-    check canUseTool("admin_user", "shell", cfg) == pdAsk
+  test "canUseTool - riskHigh admin is allowed":
+    # Admin fast-path: without it, gating shell through canUseTool would
+    # return pdAsk for every caller — disabling the tool outright in
+    # daemon mode, where no interactive approval flow exists.
+    check canUseTool("admin_user", "shell", cfg) == pdAllow
 
   # ---------------------------------------------------------------------------
   # canUseTool — edge cases

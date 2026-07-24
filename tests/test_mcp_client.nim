@@ -322,3 +322,68 @@ suite "mcp_client real round-trip (thread-based mock server)":
       caught = true
       check "boom" in e.msg
     check caught
+
+# ---------------------------------------------------------------------------
+# Malformed server responses — regression guards for the AssertionDefect
+# class: `.hasKey` on a non-object JsonNode is a Defect (not a
+# CatchableError), so before the kind guards every case below crashed the
+# whole process instead of raising McpProtocolError.
+# ---------------------------------------------------------------------------
+
+import talos_core/tool_registry
+import talos_core/mcp_tool
+
+suite "mcp_client malformed responses (thread-based mock server)":
+  test "non-object JSON-RPC response raises McpProtocolError, not a crash":
+    let server = startMockServer()
+    defer: stopMockServer(server)
+    server.enqueue("200 OK", "\"oops\"")
+    let client = newMcpClient(newMcpServerConfig(url = baseUrlFor(server)))
+    expect McpProtocolError:
+      discard client.initialize()
+
+  test "initialize with non-object result raises McpProtocolError":
+    let server = startMockServer()
+    defer: stopMockServer(server)
+    server.enqueue("200 OK", """{"jsonrpc":"2.0","id":1,"result":"oops"}""")
+    let client = newMcpClient(newMcpServerConfig(url = baseUrlFor(server)))
+    expect McpProtocolError:
+      discard client.initialize()
+
+  test "listTools with non-object result returns no tools":
+    let server = startMockServer()
+    defer: stopMockServer(server)
+    let client = newInitializedClient(server)
+    server.enqueue("200 OK", """{"jsonrpc":"2.0","id":2,"result":"oops"}""")
+    check client.listTools().len == 0
+
+  test "callTool with non-object result falls back to raw JSON":
+    let server = startMockServer()
+    defer: stopMockServer(server)
+    let client = newInitializedClient(server)
+    server.enqueue("200 OK", """{"jsonrpc":"2.0","id":3,"result":"oops"}""")
+    check client.callTool("t", %*{}) == "\"oops\""
+
+# ---------------------------------------------------------------------------
+# _callerId must never reach the remote server (wire-level assertion)
+# ---------------------------------------------------------------------------
+
+suite "mcp_tool strips _callerId on the wire":
+  test "registered MCP tool forwards args without _callerId":
+    let server = startMockServer()
+    defer: stopMockServer(server)
+    let client = newInitializedClient(server)
+    server.enqueue("200 OK",
+      """{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"ok"}]}}""")
+
+    let reg = newToolRegistry()
+    registerMcpTool(reg,
+      McpTool(server: "mock", name: "echo_tool", description: ""), client)
+    let res = reg.execute("echo_tool",
+      %*{"q": "hi", "_callerId": "discord-user-42"})
+
+    check not res.isError
+    let wire = server.requestBodies[^1]
+    check "_callerId" notin wire
+    check "discord-user-42" notin wire
+    check "\"q\":\"hi\"" in wire

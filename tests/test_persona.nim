@@ -180,3 +180,33 @@ suite "System prompt defaults":
   test "persona system prompt is empty by default":
     let pc = PersonaConfig(name: "anon")
     check: pc.systemPrompt.len == 0
+suite "malformed personas file":
+  test "syntax error raises PersonaError instead of being discarded":
+    # Regression guard: the parser loop used to `discard` cfgError events,
+    # so a genuine syntax error silently dropped the affected content with
+    # no warning anywhere. (Note parsecfg is lenient about a missing `=` —
+    # an unclosed section header or unterminated quote is what reliably
+    # produces a cfgError event.)
+    var reg = newPersonaRegistry()
+    let stream = newStringStream(
+      "[personas.broken\nsystem_prompt = \"hi\"\n")
+    expect PersonaError:
+      loadPersonasFromStream(reg, stream)
+
+  test "unterminated quoted value raises PersonaError":
+    var reg = newPersonaRegistry()
+    let stream = newStringStream(
+      "[personas.x]\nsystem_prompt = \"unterminated\n")
+    expect PersonaError:
+      loadPersonasFromStream(reg, stream)
+
+  test "duplicate persona name (case-insensitive) raises PersonaError":
+    # Names are case-insensitive by design, so [personas.Foo] and
+    # [personas.foo] collide. The CLI wraps this in a clean error
+    # (loadPersonasSafe) instead of an unhandled stack trace.
+    var reg = newPersonaRegistry()
+    let stream = newStringStream(
+      "[personas.Foo]\nsystem_prompt = \"a\"\n" &
+      "[personas.foo]\nsystem_prompt = \"b\"\n")
+    expect PersonaError:
+      loadPersonasFromStream(reg, stream)

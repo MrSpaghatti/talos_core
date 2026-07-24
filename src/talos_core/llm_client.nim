@@ -203,6 +203,10 @@ proc parseResponse(body: string): ChatResponse =
     raise newException(ProtocolError, "Choice missing 'message' field")
 
   let message = choice["message"]
+  # e.g. {"message": null, ...}: .hasKey on a non-object raises an
+  # uncatchable AssertionDefect, which no caller's `except LLMError` sees.
+  if message.kind != JObject:
+    raise newException(ProtocolError, "'message' field is not an object")
   result = ChatResponse(raw: node)
 
   if message.hasKey("content") and message["content"].kind == JString:
@@ -372,6 +376,9 @@ proc aggregateStreamingToolCalls(deltas: seq[JsonNode]): seq[ToolCall] =
   result = @[]
   var byIndex = initTable[int, tuple[id, name, args: string]]()
   for node in deltas:
+    if node.isNil or node.kind != JObject:
+      # .hasKey on a non-object delta raises an uncatchable AssertionDefect
+      continue
     var idx = 0
     if node.hasKey("index") and node["index"].kind == JInt:
       idx = node["index"].getInt()
@@ -408,39 +415,80 @@ type
     chunkRemaining: int
     eof: bool
 
+proc recvLineNet(sock: Socket; timeoutMs: int): string =
+  ## `recvLine` with socket failures rewrapped as NetworkError, so the
+  ## streaming path surfaces the same typed errors callers of this module
+  ## already handle from the non-streaming path (see doRequest) — instead
+  ## of leaking raw OSError/TimeoutError from a mid-stream connection drop.
+  try:
+    sock.recvLine(timeout = timeoutMs)
+  except OSError as e:
+    raise newException(NetworkError, "socket error during streaming: " & e.msg)
+  except TimeoutError as e:
+    raise newException(NetworkError, "socket timeout during streaming: " & e.msg)
+  except IOError as e:
+    raise newException(NetworkError, "I/O error during streaming: " & e.msg)
+
+proc recvNet(sock: Socket; size: int; timeoutMs: int): string =
+  ## `recv` with the same NetworkError rewrapping as recvLineNet.
+  try:
+    sock.recv(size, timeout = timeoutMs)
+  except OSError as e:
+    raise newException(NetworkError, "socket error during streaming: " & e.msg)
+  except TimeoutError as e:
+    raise newException(NetworkError, "socket timeout during streaming: " & e.msg)
+  except IOError as e:
+    raise newException(NetworkError, "I/O error during streaming: " & e.msg)
+
+const MaxChunkSize* = 8 * 1024 * 1024
+  ## Upper bound on a single chunked-transfer chunk. SSE events from an LLM
+  ## are a few KiB; anything approaching this is a broken or hostile server.
+
+proc parseChunkSize*(sizeLine: string): int =
+  ## Parses an HTTP chunked-transfer chunk-size line (hex digits, optional
+  ## ";extension"). Raises `ProtocolError` for a malformed, negative, or
+  ## oversized size.
+  ##
+  ## The length check must come BEFORE parseHexInt: parseHexInt has no
+  ## overflow check and wraps mod 2^64, so an oversized line can land on a
+  ## small *positive* value (parseHexInt("10000000000000005") == 5) — a
+  ## sign check after the fact catches only some wraps. The size cap also
+  ## bounds the eager `setLen(size)` allocation inside `Socket.recv`, which
+  ## would otherwise attempt a multi-GB allocation from one crafted header
+  ## line before any body bytes arrive.
+  let hexPart = block:
+    let semiIdx = sizeLine.find(';')
+    (if semiIdx >= 0: sizeLine[0 ..< semiIdx] else: sizeLine).strip()
+  if hexPart.len == 0 or hexPart.len > 7:  # 7 hex digits = max 256 MiB-1
+    raise newException(ProtocolError,
+      "invalid chunked-transfer size line: " & sizeLine.strip())
+  var size = 0
+  try:
+    size = parseHexInt(hexPart)
+  except ValueError:
+    raise newException(ProtocolError,
+      "invalid chunked-transfer size line: " & sizeLine.strip())
+  if size > MaxChunkSize:
+    raise newException(ProtocolError,
+      "chunked-transfer chunk of " & $size & " bytes exceeds the " &
+      $MaxChunkSize & "-byte limit")
+  size
+
 proc fillMore(r: var BodyReader) =
   if r.eof:
     return
   if r.chunked:
     if r.chunkRemaining == 0:
-      let sizeLine = r.sock.recvLine(timeout = r.timeoutMs)
+      let sizeLine = recvLineNet(r.sock, r.timeoutMs)
       if sizeLine.len == 0:
         r.eof = true
         return
-      let hexPart = block:
-        let semiIdx = sizeLine.find(';')
-        (if semiIdx >= 0: sizeLine[0 ..< semiIdx] else: sizeLine).strip()
-      var size = 0
-      try:
-        size = parseHexInt(hexPart)
-      except ValueError:
-        r.eof = true
-        return
-      if size < 0:
-        # parseHexInt silently overflows to a negative value for an
-        # oversized/adversarial chunk-size line (e.g. "ffffffffffffffff")
-        # instead of raising. Treat that the same as a malformed size —
-        # otherwise chunkRemaining goes negative, the read loop below never
-        # runs, and the code would go on to consume the next real line of
-        # the stream as if it were this chunk's trailing CRLF, silently
-        # desyncing the parser.
-        r.eof = true
-        return
+      let size = parseChunkSize(sizeLine)
       if size == 0:
         # Terminal chunk: consume optional trailer headers up to the
         # final blank line, then signal end of body.
         while true:
-          let trailer = r.sock.recvLine(timeout = r.timeoutMs)
+          let trailer = recvLineNet(r.sock, r.timeoutMs)
           if trailer.len == 0 or trailer == "\r\n":
             break
         r.eof = true
@@ -448,16 +496,16 @@ proc fillMore(r: var BodyReader) =
       r.chunkRemaining = size
     var remaining = r.chunkRemaining
     while remaining > 0:
-      let data = r.sock.recv(remaining, timeout = r.timeoutMs)
+      let data = recvNet(r.sock, remaining, r.timeoutMs)
       if data.len == 0:
         r.eof = true
         return
       r.pending.add(data)
       remaining -= data.len
     r.chunkRemaining = 0
-    discard r.sock.recvLine(timeout = r.timeoutMs)  # trailing CRLF after chunk data
+    discard recvLineNet(r.sock, r.timeoutMs)  # trailing CRLF after chunk data
   else:
-    let data = r.sock.recv(4096, timeout = r.timeoutMs)
+    let data = recvNet(r.sock, 4096, r.timeoutMs)
     if data.len == 0:
       r.eof = true
       return
@@ -546,8 +594,15 @@ proc chatCompletionStream*(
     else:
       raise newException(NetworkError,
         "HTTPS requested but compiled without -d:ssl")
-  sock.connect(host, Port(portNum))
-  sock.send(req)
+  try:
+    sock.connect(host, Port(portNum))
+    sock.send(req)
+  except OSError as e:
+    raise newException(NetworkError,
+      "failed to connect for streaming: " & e.msg)
+  except IOError as e:
+    raise newException(NetworkError,
+      "failed to connect for streaming: " & e.msg)
 
   # ---------- Read response headers ----------
   # `recvLine` pads a genuine blank line to "\r\n" (2 chars) specifically so
@@ -557,7 +612,7 @@ proc chatCompletionStream*(
   var status = 0
   var headers = initTable[string, string]()
   while true:
-    let line = sock.recvLine(timeout = client.timeoutMs)
+    let line = recvLineNet(sock, client.timeoutMs)
     if line.len == 0:
       raise newException(NetworkError, "connection closed while reading response headers")
     if statusLine.len == 0:
@@ -613,20 +668,28 @@ proc chatCompletionStream*(
           sawDone = true
         else:
           try:
+            # Every .hasKey below must be preceded by a kind == JObject
+            # check on its node: a malformed SSE event (`data: "hello"`,
+            # `{"choices":[null]}`, ...) otherwise raises an uncatchable
+            # AssertionDefect — the `except JsonParsingError` here only
+            # covers JSON *syntax* errors. The non-streaming parseResponse
+            # already guards these; this path must match it.
             let node = parseJson(dataBuf)
-            if node.hasKey("choices") and node["choices"].kind == JArray and
+            if node.kind == JObject and
+               node.hasKey("choices") and node["choices"].kind == JArray and
                node["choices"].len > 0:
               let choice = node["choices"][0]
 
               # --- Track finish_reason ---
-              if choice.hasKey("finish_reason") and
+              if choice.kind == JObject and choice.hasKey("finish_reason") and
                  not choice["finish_reason"].isNil and
                  choice["finish_reason"].kind == JString:
                 let fr = choice["finish_reason"].getStr()
                 if fr.len > 0:
                   result.finishReason = fr
 
-              if choice.hasKey("delta") and choice["delta"].kind == JObject:
+              if choice.kind == JObject and
+                 choice.hasKey("delta") and choice["delta"].kind == JObject:
                 let delta = choice["delta"]
 
                 # --- Content delta ---
@@ -640,6 +703,8 @@ proc chatCompletionStream*(
                 # --- Tool call deltas ---
                 if delta.hasKey("tool_calls") and delta["tool_calls"].kind == JArray:
                   for tcNode in delta["tool_calls"]:
+                    if tcNode.kind != JObject:
+                      continue
                     toolCallDeltas.add(tcNode)
                     if onEvent != nil:
                       var ev = ChatCompletionStreamEvent(kind: sekToolCallDelta)
@@ -656,7 +721,8 @@ proc chatCompletionStream*(
                       onEvent(ev)
 
             # --- Usage (arrives in final chunk) ---
-            if node.hasKey("usage") and node["usage"].kind == JObject:
+            if node.kind == JObject and
+               node.hasKey("usage") and node["usage"].kind == JObject:
               let u = node["usage"]
               if u.hasKey("prompt_tokens") and u["prompt_tokens"].kind == JInt:
                 result.usage.promptTokens = u["prompt_tokens"].getInt()
@@ -666,7 +732,8 @@ proc chatCompletionStream*(
                 result.usage.totalTokens = u["total_tokens"].getInt()
 
             # --- Model ---
-            if node.hasKey("model") and node["model"].kind == JString:
+            if node.kind == JObject and
+               node.hasKey("model") and node["model"].kind == JString:
               result.model = node["model"].getStr()
 
           except JsonParsingError:

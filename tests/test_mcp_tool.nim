@@ -80,6 +80,34 @@ suite "registerMcpTool":
     check tool.parameters.len == 0
 
 # ---------------------------------------------------------------------------
+# Tests: stripReservedArgs
+# ---------------------------------------------------------------------------
+
+suite "stripReservedArgs":
+  test "_callerId is removed, other args untouched":
+    let args = %*{"query": "weather", "_callerId": "discord-user-42", "n": 3}
+    let cleaned = stripReservedArgs(args)
+    check not cleaned.hasKey("_callerId")
+    check cleaned["query"].getStr() == "weather"
+    check cleaned["n"].getInt() == 3
+
+  test "input is not mutated":
+    # The same args node is reused for local logging/memory after the MCP
+    # call; stripping must operate on a copy.
+    let args = %*{"query": "weather", "_callerId": "discord-user-42"}
+    discard stripReservedArgs(args)
+    check args.hasKey("_callerId")
+
+  test "args without _callerId pass through unchanged":
+    let args = %*{"query": "weather"}
+    check stripReservedArgs(args) == args
+
+  test "nil and non-object args pass through":
+    check stripReservedArgs(nil).isNil
+    let arr = %*[1, 2, 3]
+    check stripReservedArgs(arr) == arr
+
+# ---------------------------------------------------------------------------
 # Tests: registerMcpTools
 # ---------------------------------------------------------------------------
 
@@ -115,6 +143,47 @@ suite "registerMcpTools":
 
     # Third tool should NOT have been registered (error on first collision)
     check not reg.has("other")
+
+  test "var out-param reflects partial progress after a raise":
+    # Regression guard for the client-leak fix: registerMcpServer decides
+    # whether to close the shared HttpClient based on how many tools were
+    # actually registered before the failure. A `result =` assignment in
+    # the caller never executes when the callee raises, so this progress
+    # has to travel through the var out-parameter instead.
+    let reg = newToolRegistry()
+    let cfg = newMcpServerConfig(url = "http://localhost:19996/mcp", timeoutMs = 500)
+    var client = newMcpClient(cfg)
+
+    registerMcpTool(reg,
+      McpTool(server: "srv", name: "taken", description: "pre-existing"),
+      client)
+
+    let batch = @[
+      McpTool(server: "srv", name: "fresh_a", description: "lands"),
+      McpTool(server: "srv", name: "fresh_b", description: "lands"),
+      McpTool(server: "srv", name: "taken", description: "collides"),
+      McpTool(server: "srv", name: "never", description: "unreached"),
+    ]
+    var registered: seq[McpTool] = @[]
+    expect ToolDuplicateError:
+      registerMcpTools(reg, batch, client, registered)
+
+    # The two tools registered before the collision survived the raise —
+    # both in the registry and, critically, in the out-param the caller
+    # uses for its close-the-client decision.
+    check registered.len == 2
+    check registered[0].name == "fresh_a"
+    check registered[1].name == "fresh_b"
+    check reg.has("fresh_a")
+    check reg.has("fresh_b")
+    check not reg.has("never")
+
+    # And the registered tools' client must still be usable (not closed):
+    # executing one hits an unreachable server, which is a connection
+    # error ToolResult — not a crash on a closed client handle.
+    let res = reg.execute("fresh_a", %*{})
+    check res.isError
+    check res.output.contains("connect")
 
 # ---------------------------------------------------------------------------
 # Tests: registerMcpServer (no-HTTP logic only)

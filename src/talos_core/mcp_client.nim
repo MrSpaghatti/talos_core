@@ -99,7 +99,7 @@ proc jsonRpcRequest*(mcpMethod: string; params: JsonNode = nil): JsonNode =
     result["params"] = newJObject()
 
 proc jsonRpcResponseId*(node: JsonNode): int =
-  if node.hasKey("id"):
+  if not node.isNil and node.kind == JObject and node.hasKey("id"):
     result = node["id"].getInt()
   else:
     result = 0
@@ -175,6 +175,16 @@ proc callMethod*(client: McpClient; mcpMethod: string; params: JsonNode = nil): 
     err.serverUrl = client.cfg.url
     raise err
 
+  # Only ever return an object: every caller goes on to call `.hasKey` on
+  # this node, which raises an uncatchable AssertionDefect on any other
+  # JSON kind (e.g. a server responding with a bare string or array).
+  if respNode.kind != JObject:
+    var err = newException(McpProtocolError,
+      "MCP server at '" & client.cfg.url &
+      "' returned a non-object JSON-RPC response: " & $respNode)
+    err.serverUrl = client.cfg.url
+    raise err
+
   respNode
 
 # ---------------------------------------------------------------------------
@@ -208,6 +218,9 @@ proc initialize*(client: McpClient; serverName: string = "talos"): string =
       "initialize response missing 'result' field at '" & client.cfg.url & "'")
 
   let initResult = resp["result"]
+  if initResult.kind != JObject:
+    raise newException(McpProtocolError,
+      "initialize response 'result' is not an object at '" & client.cfg.url & "'")
   if initResult.hasKey("protocolVersion") and initResult["protocolVersion"].kind == JString:
     client.protocolVersion = initResult["protocolVersion"].getStr()
   else:
@@ -247,7 +260,10 @@ proc listTools*(client: McpClient): seq[McpTool] =
       "tools/list response missing 'result' at '" & client.cfg.url & "'")
 
   let resultNode = resp["result"]
-  if resultNode.hasKey("tools") and resultNode["tools"].kind == JArray:
+  # A non-object "result" (e.g. {"result":"oops"}) means no tools — .hasKey
+  # on it would raise an uncatchable AssertionDefect.
+  if resultNode.kind == JObject and
+      resultNode.hasKey("tools") and resultNode["tools"].kind == JArray:
     for toolNode in resultNode["tools"]:
       if toolNode.kind != JObject:
         continue
@@ -284,7 +300,10 @@ proc callTool*(client: McpClient; toolName: string; args: JsonNode): string =
 
   let resultNode = resp["result"]
   # MCP result format: { "content": [{ "type": "text", "text": "..." }] }
-  if resultNode.hasKey("content") and resultNode["content"].kind == JArray:
+  # Guard the kind first: .hasKey on a non-object "result" raises an
+  # uncatchable AssertionDefect; the pretty() fallback below handles it.
+  if resultNode.kind == JObject and
+      resultNode.hasKey("content") and resultNode["content"].kind == JArray:
     var parts: seq[string] = @[]
     for content in resultNode["content"]:
       if content.kind == JObject and content.hasKey("text"):

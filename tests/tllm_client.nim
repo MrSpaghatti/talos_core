@@ -347,6 +347,82 @@ suite "chatCompletionStream":
     check resp.finishReason == "tool_calls"
 
 # ---------------------------------------------------------------------------
+# Malformed responses — regression guards for the AssertionDefect class:
+# `.hasKey` on a non-object JsonNode is a Defect (not a CatchableError),
+# so before the kind guards each case below crashed the whole process.
+# ---------------------------------------------------------------------------
+
+suite "malformed response handling":
+  test "non-streaming: null message raises ProtocolError, not a crash":
+    sharedServer.enqueue("200 OK", $(%*{
+      "choices": [{"message": nil, "finish_reason": "stop"}]
+    }))
+    let client = makeClient(sharedServer, maxRetries = 1)
+    expect ProtocolError:
+      discard client.chatCompletion("hi")
+
+  test "streaming: non-object SSE events are skipped, stream completes":
+    # data: "hello" (bare string), data: 42, and a null choice must all be
+    # ignored — not crash the parser — and later valid events still count.
+    let valid = %*{
+      "id": "s1", "model": "test-model",
+      "choices": [{"index": 0, "delta": {"content": "still works"}}]
+    }
+    let body = "data: \"hello\"\n\n" &
+               "data: 42\n\n" &
+               "data: {\"choices\":[null]}\n\n" &
+               "data: {\"choices\":[{\"delta\":{\"tool_calls\":[null]}}]}\n\n" &
+               "data: " & $valid & "\n\n" &
+               "data: [DONE]\n\n"
+    sharedServer.enqueue("200 OK", body)
+    let client = makeClient(sharedServer)
+    let resp = client.chatCompletionStream("run", onEvent = nil)
+    check resp.content == "still works"
+
+# ---------------------------------------------------------------------------
+# Chunked-transfer size parsing
+# ---------------------------------------------------------------------------
+
+suite "parseChunkSize":
+  test "normal sizes parse, with and without extension":
+    check parseChunkSize("1f4") == 500
+    check parseChunkSize("1f4;name=value") == 500
+    check parseChunkSize("0") == 0
+    check parseChunkSize("  a\r\n") == 10
+
+  test "positive-wrap overflow is rejected, not parsed as a small size":
+    # parseHexInt wraps mod 2^64: "10000000000000005" parses to 5 and
+    # "ABCD0000000000000064" to 100. A sign check alone lets these through
+    # and silently desyncs the chunk parser.
+    expect ProtocolError:
+      discard parseChunkSize("10000000000000005")
+    expect ProtocolError:
+      discard parseChunkSize("ABCD0000000000000064")
+
+  test "negative-wrap overflow is rejected":
+    expect ProtocolError:
+      discard parseChunkSize("ffffffffffffffff")
+
+  test "huge-but-valid hex is rejected before allocation":
+    # 0x100000000 = 4 GiB: within int64 range, but Socket.recv would
+    # eagerly setLen() a buffer this big before reading a single byte.
+    expect ProtocolError:
+      discard parseChunkSize("100000000")
+
+  test "oversized chunk within digit limit is rejected by the byte cap":
+    check parseChunkSize("800000") == MaxChunkSize
+    expect ProtocolError:
+      discard parseChunkSize("800001")
+
+  test "garbage is rejected":
+    expect ProtocolError:
+      discard parseChunkSize("")
+    expect ProtocolError:
+      discard parseChunkSize("zz")
+    expect ProtocolError:
+      discard parseChunkSize(";ext-only")
+
+# ---------------------------------------------------------------------------
 # Teardown
 # ---------------------------------------------------------------------------
 

@@ -34,6 +34,13 @@ type
     ## with the request's channelId. Used to refresh a "still working"
     ## indicator (e.g. Discord typing status) on long multi-turn runs.
 
+  RequestSetupCallback* = proc() {.gcsafe, raises: [].}
+    ## Called once at the start of every dispatched request, before the
+    ## agent loop runs. Used to reset per-request state that lives outside
+    ## the dispatcher — e.g. the delegation budget, which is otherwise a
+    ## process-lifetime global that permanently exhausts after a few
+    ## delegations across unrelated conversations.
+
   AgentDispatcher* = ref object
     callback*: AgentCallback
     cfg*: TalosConfig
@@ -42,6 +49,7 @@ type
     dbPath*: string
     active*: bool   ## true once cfg/llm/reg/dbPath are populated (production mode)
     turnCallback*: TurnCallback
+    requestSetup*: RequestSetupCallback
 
 
 proc newAgentDispatcher*(callback: AgentCallback): AgentDispatcher =
@@ -52,12 +60,13 @@ proc newAgentDispatcher*(callback: AgentCallback): AgentDispatcher =
 
 proc newAgentDispatcher*(callback: AgentCallback; cfg: TalosConfig;
                           llm: LLMClient; reg: ToolRegistry; dbPath: string;
-                          turnCallback: TurnCallback = nil): AgentDispatcher =
+                          turnCallback: TurnCallback = nil;
+                          requestSetup: RequestSetupCallback = nil): AgentDispatcher =
   ## Full constructor for production use (talos daemon).
   ## The callback is invoked on the event-loop thread when processing completes.
   AgentDispatcher(
     callback: callback, cfg: cfg, llm: llm, reg: reg, dbPath: dbPath, active: true,
-    turnCallback: turnCallback
+    turnCallback: turnCallback, requestSetup: requestSetup
   )
 
 proc dispatchAgent*(dispatcher: AgentDispatcher; request: AgentRequest): Future[void] {.async, gcsafe.} =
@@ -76,6 +85,8 @@ proc dispatchAgent*(dispatcher: AgentDispatcher; request: AgentRequest): Future[
   if dispatcher.active:
     {.cast(gcsafe), cast(raises: []).}:
       try:
+        if dispatcher.requestSetup != nil:
+          dispatcher.requestSetup()
         var mem = newMemory(dispatcher.dbPath)
         defer: mem.close()
         var agentCfg = newAgentConfig(dispatcher.cfg)

@@ -24,6 +24,19 @@ import talos_core/tool_registry
 # Per-tool execute proc factory
 # ---------------------------------------------------------------------------
 
+proc stripReservedArgs*(args: JsonNode): JsonNode =
+  ## Returns `args` without the reserved `_callerId` key the agent loop
+  ## injects into every tool call for local permission checks. Reserved
+  ## keys must never reach a remote MCP server: they can fail strict
+  ## schema validation, they leak the caller's identity (e.g. a real
+  ## Discord user id) to a third party, and echo-style tools reflect them
+  ## back into the LLM context. Returns the input unchanged (same ref)
+  ## when there is nothing to strip; never mutates the input.
+  if args.isNil or args.kind != JObject or not args.hasKey("_callerId"):
+    return args
+  result = args.copy()
+  result.delete("_callerId")
+
 proc makeMcpToolExecuteProc(
     client: McpClient;
     toolName: string;
@@ -35,7 +48,7 @@ proc makeMcpToolExecuteProc(
   let mc = client       # capture ref safely
   result = proc (args: JsonNode): ToolResult {.gcsafe, raises: [].} =
     try:
-      let output = mc.callTool(name, args)
+      let output = mc.callTool(name, stripReservedArgs(args))
       ToolResult(output: output, isError: false, exitCode: 0)
     except McpToolNotFoundError as e:
       ToolResult(output: "tool not found on MCP server: " & e.msg,
@@ -90,22 +103,34 @@ proc registerMcpTools*(
     reg: ToolRegistry;
     mcpTools: seq[McpTool];
     client: McpClient;
-): seq[McpTool] {.discardable.} =
+    registered: var seq[McpTool];
+) =
   ## Registers all `McpTool` objects into a `ToolRegistry`. Uses the same
   ## `McpClient` for all tools (assumes they come from the same server).
-  ## Returns the subset of `mcpTools` that were actually registered —
-  ## distinct from `mcpTools` itself if registration stops partway.
+  ## Appends each tool to `registered` as it lands in the registry.
   ##
   ## Raises `ToolDuplicateError` on the first name collision with an
-  ## already-registered tool; anything registered before that point is
-  ## still reflected in the return value.
-  result = @[]
+  ## already-registered tool. `registered` is a `var` out-parameter (not a
+  ## return value) precisely so partial progress survives that raise: a
+  ## `result =` assignment in the caller never executes when the callee
+  ## raises, which is how a previous version of registerMcpServer ended up
+  ## closing a client that live tools still referenced.
   for tool in mcpTools:
     if reg.has(tool.name):
       raise newException(ToolDuplicateError,
         "tool '" & tool.name & "' already registered; cannot add from MCP")
     registerMcpTool(reg, tool, client)
-    result.add(tool)
+    registered.add(tool)
+
+proc registerMcpTools*(
+    reg: ToolRegistry;
+    mcpTools: seq[McpTool];
+    client: McpClient;
+): seq[McpTool] {.discardable.} =
+  ## Convenience overload returning the registered subset. Only safe when
+  ## the caller doesn't need partial progress after an exception.
+  result = @[]
+  registerMcpTools(reg, mcpTools, client, result)
 
 # ---------------------------------------------------------------------------
 # Convenience: build and register from server configs in one shot
@@ -127,12 +152,11 @@ proc registerMcpServer*(
   try:
     discard client.initialize()
     let tools = client.listTools()
-    # `result` reflects tools actually registered, not merely discovered —
-    # if registerMcpTools raises partway (e.g. a name collision), only the
-    # tools registered before that point are included, so the `result.len
-    # == 0` check below correctly detects "nothing holds a reference to
-    # this client" and the reported count downstream isn't inflated.
-    result = registerMcpTools(reg, tools, client)
+    # `result` is passed as the var out-parameter so it reflects tools
+    # actually registered even when registerMcpTools raises partway (e.g. a
+    # name collision after tool 2 of 5): the `result.len == 0` check below
+    # then correctly detects "nothing holds a reference to this client".
+    registerMcpTools(reg, tools, client, result)
     # Keep client alive — its HttpClient is used by each tool's execute proc.
   except CatchableError as e:
     if result.len == 0:

@@ -180,8 +180,15 @@ proc loadPersonasFromStream*(reg: var PersonaRegistry; stream: Stream) =
           discard
       else:
         discard
-    of cfgOption, cfgError:
+    of cfgOption:
       discard
+    of cfgError:
+      # A genuine syntax error (e.g. a missing `=`). Discarding it means
+      # the affected key silently never applies — same bug class as the
+      # .env parser's silently-discarded parse failures, which config.nim
+      # already fixed by raising ConfigError.
+      raise newException(PersonaError,
+        "personas file syntax error: " & event.msg)
 
 proc loadPersonasFile*(path: string): PersonaRegistry =
   ## Loads all personas from a TOML/INI config file.
