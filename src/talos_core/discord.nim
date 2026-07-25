@@ -9,13 +9,14 @@
 ## are injected as callback procs so that both MockDiscordApi and RealDiscordApi
 ## can be used without generics — avoiding Nim's {.async.} + generics limitation.
 
-import std/[asyncdispatch, logging, options, strutils, times]
+import std/[asyncdispatch, logging, options, strutils]
 import db_connector/db_sqlite
 import discord_mocks, discord_types, permission, discord_commands,
        agent_dispatcher, message_chunker
 import dimscord
 import discord_bridge
 import thread_mapping
+import util
 
 type
   SendMessageFn* = proc (channelId, content: string): Future[string] {.async, gcsafe.}
@@ -53,9 +54,6 @@ proc newDiscordBot*(sendMessage: SendMessageFn;
     shard: shard,
   )
 
-proc generateSessionId(): string =
-  let t = now().utc
-  return "sess_" & t.format("yyyyMMdd'T'HHmmss") & "_" & $getTime().nanosecond
 
 proc onMessageCreate*(bot: DiscordBot; msg: discord_mocks.Message) {.async, gcsafe.} =
   ## Main message handler. Routes messages to commands or agent dispatch.

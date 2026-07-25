@@ -23,8 +23,10 @@
 ##   - Cross-session retrieval
 
 import db_connector/db_sqlite
-import std/[json, strutils, times]
+import std/[json, strutils, os]
+import talos_core/config
 import talos_core/llm_client
+import talos_core/util
 
 # ---------------------------------------------------------------------------
 # Public types
@@ -109,20 +111,6 @@ proc jsonToToolCalls(s: string): seq[ToolCall] =
   except CatchableError:
     discard
 
-proc nowIso(): string =
-  ## Returns the current UTC time as an ISO 8601 string.
-  let t = now().utc
-  return t.format("yyyy-MM-dd'T'HH:mm:ss'Z'")
-
-proc generateSessionId(salt: int = 0): string =
-  ## Generates a session ID based on the current UTC timestamp plus a
-  ## nanosecond component for uniqueness. `salt`, when non-zero, adds a
-  ## disambiguating suffix for retrying after a collision (see newSession).
-  let t = now().utc
-  result = "sess_" & t.format("yyyyMMdd'T'HHmmss") & "_" &
-           $getTime().nanosecond
-  if salt > 0:
-    result.add("_" & $salt)
 
 # ---------------------------------------------------------------------------
 # Schema initialisation
@@ -393,3 +381,20 @@ proc getTokenUsage*(m: Memory; sessionId: string): TokenUsage =
     completionTokens: parseInt(row[1]),
     totalTokens:      parseInt(row[2]),
   )
+
+proc resolveDbPath*(cfg: TalosConfig): string =
+  ## Expands `~` in the configured DB path and ensures the parent dir
+  ## exists. Returns the absolute path used for SQLite.
+  result = cfg.dbPath
+  if result.startsWith("~"):
+    result = expandTilde(result)
+  let parent = parentDir(result)
+  if parent.len > 0 and not dirExists(parent):
+    try:
+      createDir(parent)
+    except CatchableError:
+      stderr.writeLine("Warning: could not create parent directory for '" & result & "'.")
+
+proc openMemory*(cfg: TalosConfig): Memory =
+  ## Opens the memory store at the path configured in `cfg`.
+  newMemory(resolveDbPath(cfg))

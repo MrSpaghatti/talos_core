@@ -29,6 +29,7 @@ import std/[json, strutils, tables]
 
 import config
 import llm_client
+import llm_stream
 import tool_registry
 import memory
 import persona

@@ -5,6 +5,7 @@
 
 import std/[json, os, strutils, tables, unittest]
 import talos_core/llm_client
+import talos_core/llm_stream
 import mock_llm_server
 
 # ---------------------------------------------------------------------------

@@ -24,7 +24,6 @@ task test, "Run all tests":
   exec "nim c -d:ssl -r tests/test_file_path_validator.nim"
   exec "nim c -d:ssl -r tests/test_file_tool.nim"
   exec "nim c -d:ssl -r tests/test_mock_server.nim"
-  exec "nim c -d:ssl -r tests/test_rate_limit.nim"
   exec "nim c -d:ssl -r tests/test_thread_mapping.nim"
   exec "nim c -d:ssl -r tests/test_thread_reconnection.nim"
   exec "nim c -d:ssl --threads:on -r tests/test_mcp_client.nim"

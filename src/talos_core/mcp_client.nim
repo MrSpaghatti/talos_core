@@ -15,6 +15,7 @@
 import std/[httpclient, json, times, strutils, os]
 
 import talos_core/config
+import util
 
 # ---------------------------------------------------------------------------
 # Types
@@ -79,15 +80,6 @@ proc newMcpClient*(cfg: McpServerConfig): McpClient =
 # JSON-RPC helpers
 # ---------------------------------------------------------------------------
 
-proc parseHttpStatusCode(status: string): int =
-  let s = status.strip()
-  let spaceIdx = s.find(' ')
-  let codePart = if spaceIdx >= 0: s[0 ..< spaceIdx] else: s
-  try:
-    return parseInt(codePart)
-  except ValueError:
-    return 0
-
 proc jsonRpcRequest*(mcpMethod: string; params: JsonNode = nil): JsonNode =
   result = newJObject()
   result["jsonrpc"] = %"2.0"
@@ -135,7 +127,7 @@ proc callMethod*(client: McpClient; mcpMethod: string; params: JsonNode = nil): 
     err.serverUrl = client.cfg.url
     raise err
 
-  let statusCode = parseHttpStatusCode(response.status)
+  let statusCode = parseStatusCode(response.status)
   if statusCode >= 400:
     var err = newException(McpConnectionError,
       "MCP server returned HTTP " & $statusCode &

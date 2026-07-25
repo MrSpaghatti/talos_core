@@ -17,7 +17,7 @@
 
 import db_connector/db_sqlite
 import std/options
-import std/times
+import util
 
 # ---------------------------------------------------------------------------
 # Schema initialisation
@@ -42,15 +42,6 @@ proc initThreadMappingSchema*(db: DbConn) =
     CREATE INDEX IF NOT EXISTS idx_discord_threads_channel
     ON discord_threads(channel_id, last_active_at DESC)
   """)
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-proc nowIso(): string =
-  ## Returns the current UTC time as an ISO 8601 string.
-  let t = now().utc
-  return t.format("yyyy-MM-dd'T'HH:mm:ss'Z'")
 
 # ---------------------------------------------------------------------------
 # Public API

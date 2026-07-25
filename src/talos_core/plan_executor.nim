@@ -26,6 +26,7 @@
 import std/[json, strutils, tables, sequtils]
 
 import llm_client
+import llm_stream
 import tool_registry
 import memory
 import agent_loop
