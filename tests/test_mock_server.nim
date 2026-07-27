@@ -1,5 +1,5 @@
 import std/[asyncdispatch, httpclient, json, unittest, net]
-import mock_server
+import talos_core/testkit/mock_server
 
 suite "MockLLMServer":
   test "returns basic text response":

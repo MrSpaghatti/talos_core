@@ -4,7 +4,7 @@ import std/[unittest, json, asyncdispatch, httpclient, strutils]
 import talos_core/mcp_client
 import talos_core/config
 import mock_mcp_server
-import mock_llm_server
+import talos_core/testkit/mock_llm_server
 
 # ---------------------------------------------------------------------------
 # Tests: config parsing

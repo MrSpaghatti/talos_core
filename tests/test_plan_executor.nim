@@ -13,7 +13,7 @@ import talos_core/plan_executor
 import talos_core/tool_registry
 import talos_core/memory
 import talos_core/agent_loop
-import mock_llm_server
+import talos_core/testkit/mock_llm_server
 
 # ---------------------------------------------------------------------------
 # Helpers
