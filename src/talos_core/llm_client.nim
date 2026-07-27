@@ -306,6 +306,33 @@ proc doRequest(
   except IOError as e:
     raise newException(NetworkError, "I/O error: " & e.msg)
 
+proc listModels*(client: LLMClient): seq[string] =
+  ## Fetches available model ids from the endpoint's `/models` list.
+  ## OpenAI-compatible endpoints (both OpenRouter and vLLM) expose this.
+  ## Best-effort: returns an empty seq on any failure instead of raising,
+  ## since this feeds a UI picker rather than being required for chat.
+  let http = newHttpClient(timeout = client.timeoutMs)
+  defer: http.close()
+  http.headers = newHttpHeaders({
+    "Accept": "application/json",
+    "User-Agent": "talos-agent/0.1",
+  })
+  if client.apiKey.len > 0:
+    http.headers["Authorization"] = "Bearer " & client.apiKey
+  try:
+    let resp = http.request(client.baseUrl & "/models", httpMethod = HttpGet)
+    if parseStatusCode(resp.status) != 200:
+      return @[]
+    let parsed = parseJson(resp.body)
+    if parsed.kind == JObject and parsed.hasKey("data") and
+       parsed["data"].kind == JArray:
+      for item in parsed["data"]:
+        if item.kind == JObject and item.hasKey("id") and
+           item["id"].kind == JString:
+          result.add(item["id"].getStr())
+  except CatchableError:
+    return @[]
+
 proc chatCompletion*(
     client: LLMClient;
     prompt: string;
