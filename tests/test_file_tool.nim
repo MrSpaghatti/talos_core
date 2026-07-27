@@ -1,5 +1,5 @@
 import unittest, os, json, strutils
-import talos_core/discord_types
+import talos_core/acl
 import talos_core/file_path_validator
 import talos_core/permission
 import talos_core/tool_registry
@@ -16,9 +16,9 @@ suite "File Tool":
       denyPatterns: @["*.secret"]
     )
     
-    var cfg = defaultDiscordConfig()
-    cfg.admins.allow.add("admin")
-    cfg.users.allow.add("user")
+    var acl = ToolAcl()
+    acl.admins.allow.add("admin")
+    acl.users.allow.add("user")
 
   teardown:
     removeDir(sandboxDir)
@@ -62,7 +62,7 @@ suite "File Tool":
 
   test "fileWriteTool admin can write to allowed path":
     let path = sandboxDir / "test.txt"
-    let t = fileWriteTool(rules, cfg)
+    let t = fileWriteTool(rules, acl)
     let args = %*{"path": path, "content": "hello admin", "_callerId": "admin"}
     let res = t.execute(args)
     check res.isError == false
@@ -70,7 +70,7 @@ suite "File Tool":
 
   test "fileWriteTool normal user gets ask on allowed path":
     let path = sandboxDir / "test2.txt"
-    let t = fileWriteTool(rules, cfg)
+    let t = fileWriteTool(rules, acl)
     let args = %*{"path": path, "content": "hello user", "_callerId": "user"}
     let res = t.execute(args)
     check res.isError == true
@@ -78,7 +78,7 @@ suite "File Tool":
 
   test "fileWriteTool deny":
     let path = sandboxDir / "test.secret"
-    let t = fileWriteTool(rules, cfg)
+    let t = fileWriteTool(rules, acl)
     let args = %*{"path": path, "content": "atomic", "_callerId": "admin"}
     let res = t.execute(args)
     check res.isError == true
@@ -88,10 +88,10 @@ suite "File Tool":
     # The tool registers as "file_write"; the permission check must query the
     # same name so an admin's tools.deny entry is enforced (regression: it
     # previously queried "write_file" and silently bypassed this deny).
-    var denyCfg = cfg
-    denyCfg.tools.deny.add("file_write")
+    var denyAcl = acl
+    denyAcl.tools.deny.add("file_write")
     let path = sandboxDir / "denied.txt"
-    let t = fileWriteTool(rules, denyCfg)
+    let t = fileWriteTool(rules, denyAcl)
     let args = %*{"path": path, "content": "should not be written", "_callerId": "admin"}
     let res = t.execute(args)
     check res.isError == true
@@ -100,7 +100,7 @@ suite "File Tool":
 
   test "fileWriteTool size limit":
     let path = sandboxDir / "big.txt"
-    let t = fileWriteTool(rules, cfg)
+    let t = fileWriteTool(rules, acl)
     let bigContent = newString(1024 * 1024 * 2) # 2MB
     let args = %*{"path": path, "content": bigContent, "_callerId": "admin"}
     let res = t.execute(args)

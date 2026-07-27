@@ -10,10 +10,12 @@
 ##   TALOS_PROVIDER, TALOS_VLLM_ENDPOINT, TALOS_OPENROUTER_ENDPOINT,
 ##   TALOS_OPENROUTER_MODEL, TALOS_VLLM_MODEL, TALOS_MAX_TOKENS,
 ##   TALOS_TEMPERATURE, TALOS_MAX_LOOP_ITERATIONS, TALOS_DB_PATH,
-##   TALOS_FILE_SANDBOX_DIR, OPENROUTER_API_KEY
+##   TALOS_WEB_PORT, OPENROUTER_API_KEY
+##
+## Product-specific config (e.g. Discord) is loaded separately by the
+## owning product — see talos_agent/discord/discord_config.nim.
 
 import std/[os, parsecfg, strutils, streams]
-import discord_types
 
 type
   McpServerConfig* = object
@@ -36,7 +38,6 @@ type
     dbPath*: string
     openrouterApiKey*: string   ## loaded from .env or env var
     webPort*: int               ## web UI listen port
-    discord*: DiscordConfig
     mcpServers*: seq[McpServerConfig]  ## Configured MCP server endpoints
 
   ConfigError* = object of CatchableError
@@ -68,7 +69,6 @@ proc defaultConfig*(): TalosConfig =
     dbPath: DefaultDbPath,
     openrouterApiKey: "",
     webPort: DefaultWebPort,
-    discord: defaultDiscordConfig(),
     mcpServers: @[],
   )
 
@@ -95,7 +95,10 @@ proc parseEnvFile*(path: string): seq[tuple[key, val: string]] =
         val = val[1 ..< val.len - 1]
     result.add((key, val))
 
-proc parseCsvList(val: string): seq[string] =
+proc parseCsvList*(val: string): seq[string] =
+  ## Generic comma-separated-list parser, reused by product-owned config
+  ## loaders (e.g. talos_agent's discord_config.nim) that layer their own
+  ## TOML sections on top of core's config.
   result = @[]
   for item in val.split(','):
     let stripped = item.strip()
@@ -221,32 +224,6 @@ proc applyTomlSection(cfg: var TalosConfig; section, key, val: string) =
     of "web_port":
       let n = parseInt(val)
       cfg.webPort = n
-    else: discard
-  of "discord":
-    case k
-    of "token_env": cfg.discord.tokenEnv = val
-    of "prefix": cfg.discord.prefix = val
-    else: discard
-  of "discord.admins":
-    case k
-    of "allow": cfg.discord.admins.allow = parseCsvList(val)
-    of "deny": cfg.discord.admins.deny = parseCsvList(val)
-    else: discard
-  of "discord.users":
-    case k
-    of "allow": cfg.discord.users.allow = parseCsvList(val)
-    of "deny": cfg.discord.users.deny = parseCsvList(val)
-    else: discard
-  of "discord.file_rules":
-    case k
-    of "allow": cfg.discord.fileRules.allow = parseCsvList(val)
-    of "deny": cfg.discord.fileRules.deny = parseCsvList(val)
-    of "sandbox_dir": cfg.discord.fileSandboxDir = val
-    else: discard
-  of "discord.tools":
-    case k
-    of "allow": cfg.discord.tools.allow = parseCsvList(val)
-    of "deny": cfg.discord.tools.deny = parseCsvList(val)
     else: discard
   else: discard
 
@@ -437,10 +414,6 @@ proc applyEnvVars(cfg: var TalosConfig) =
   let apiKey = getEnv("OPENROUTER_API_KEY")
   if apiKey.len > 0:
     cfg.openrouterApiKey = apiKey
-
-  let fileSandboxDir = getEnv("TALOS_FILE_SANDBOX_DIR")
-  if fileSandboxDir.len > 0:
-    cfg.discord.fileSandboxDir = fileSandboxDir
 
   let webPortStr = getEnv("TALOS_WEB_PORT")
   if webPortStr.len > 0:

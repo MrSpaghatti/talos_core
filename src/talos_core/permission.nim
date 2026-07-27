@@ -1,4 +1,4 @@
-import discord_types
+import acl
 
 type
   ToolRiskLevel* = enum
@@ -20,31 +20,31 @@ proc getToolRisk*(toolName: string): ToolRiskLevel =
   of "file_read", "read_file", "search": riskLow
   else: riskMedium
 
-proc isAdmin*(userId: string, cfg: DiscordConfig): bool =
-  if userId in cfg.admins.deny:
+proc isAdmin*(userId: string, acl: ToolAcl): bool =
+  if userId in acl.admins.deny:
     return false
-  return userId in cfg.admins.allow
+  return userId in acl.admins.allow
 
-proc isUserAllowed*(userId: string, cfg: DiscordConfig): bool =
-  if userId in cfg.users.deny:
+proc isUserAllowed*(userId: string, acl: ToolAcl): bool =
+  if userId in acl.users.deny:
     return false
-  if userId in cfg.users.allow:
+  if userId in acl.users.allow:
     return true
-  return isAdmin(userId, cfg)
+  return isAdmin(userId, acl)
 
 proc canUseTool*(
-    userId: string, toolName: string, cfg: DiscordConfig
+    userId: string, toolName: string, acl: ToolAcl
 ): PermissionDecision =
   # check user in allow list
-  if not isUserAllowed(userId, cfg):
+  if not isUserAllowed(userId, acl):
     return pdDeny
 
   # check tool explicit deny
-  if toolName in cfg.tools.deny:
+  if toolName in acl.tools.deny:
     return pdDeny
 
   # check tool explicit allow
-  if toolName in cfg.tools.allow:
+  if toolName in acl.tools.allow:
     return pdAllow
 
   # check tool risk
@@ -54,7 +54,7 @@ proc canUseTool*(
     return pdAllow
 
   if risk == riskMedium:
-    if isAdmin(userId, cfg):
+    if isAdmin(userId, acl):
       return pdAllow
     else:
       return pdAsk
@@ -66,7 +66,7 @@ proc canUseTool*(
     # in daemon mode — i.e. disable the tool outright, since there is no
     # interactive approval flow. Operators who want shell for non-admin
     # users can still add it to tools.allow explicitly.
-    if isAdmin(userId, cfg):
+    if isAdmin(userId, acl):
       return pdAllow
     else:
       return pdAsk

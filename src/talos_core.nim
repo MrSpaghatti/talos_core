@@ -6,10 +6,14 @@
 ## New modules (config, llm_client, memory, tool_registry, mcp_*,
 ## persona, delegate) are intentionally not re-exported here
 ## because they are always imported explicitly.
+##
+## Discord-specific modules (discord, discord_bridge, discord_commands,
+## discord_mocks, discord_types, thread_mapping) moved to talos_agent —
+## core has no product baked in.
 
 when isMainModule:
   discard
 
-import talos_core/[agent_dispatcher, discord, discord_bridge, discord_commands, discord_mocks, discord_types, file_path_validator, file_tool, message_chunker, permission, thread_mapping]
+import talos_core/[acl, agent_dispatcher, file_path_validator, file_tool, message_chunker, permission]
 
-export agent_dispatcher, discord, discord_bridge, discord_commands, discord_mocks, discord_types, file_path_validator, file_tool, message_chunker, permission, thread_mapping
+export acl, agent_dispatcher, file_path_validator, file_tool, message_chunker, permission

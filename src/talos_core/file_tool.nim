@@ -2,7 +2,7 @@ import json, os
 import file_path_validator
 import permission
 import tool_registry
-import discord_types
+import acl
 
 const MaxFileSize* = 1024 * 1024 # 1MB
 
@@ -49,7 +49,7 @@ proc fileReadTool*(rules: FileRules): Tool =
 
   result = newTool("file_read", "Read contents of a file", parameters, execute)
 
-proc fileWriteTool*(rules: FileRules, cfg: DiscordConfig): Tool =
+proc fileWriteTool*(rules: FileRules, acl: ToolAcl): Tool =
   let parameters = %*{
     "type": "object",
     "properties": {
@@ -84,7 +84,7 @@ proc fileWriteTool*(rules: FileRules, cfg: DiscordConfig): Tool =
       return ToolResult(output: "Requires approval", isError: true, exitCode: 1)
     of pathAllow:
       let userId = args{"_callerId"}.getStr("")
-      let perm = canUseTool(userId, "file_write", cfg)
+      let perm = canUseTool(userId, "file_write", acl)
       case perm
       of pdDeny:
         return ToolResult(output: "Access denied: user not allowed", isError: true, exitCode: 1)

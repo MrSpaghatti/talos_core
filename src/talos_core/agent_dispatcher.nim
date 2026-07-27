@@ -16,8 +16,9 @@ type
   AgentRequest* = object
     userInput*: string
     sessionId*: string
-    channelId*: string
-    threadId*: string
+    surfaceId*: string  ## Opaque "where does the reply go" identifier — a
+                        ## Discord channel/thread id today, product-defined
+                        ## in general. Core only ever threads it through.
     userId*: string  ## Real caller identity (e.g. Discord author id), threaded
                       ## through to AgentConfig.callerId for per-call permission
                       ## checks (see file_tool.fileWriteTool).
@@ -25,13 +26,13 @@ type
   AgentResult* = object
     responseText*: string
     error*: Option[string]
-    channelId*: string
+    surfaceId*: string
 
   AgentCallback* = proc(result: AgentResult) {.gcsafe, raises: [].}
 
-  TurnCallback* = proc(channelId: string) {.gcsafe, raises: [].}
+  TurnCallback* = proc(surfaceId: string) {.gcsafe, raises: [].}
     ## Called once at the start of every ReAct iteration during a dispatch,
-    ## with the request's channelId. Used to refresh a "still working"
+    ## with the request's surfaceId. Used to refresh a "still working"
     ## indicator (e.g. Discord typing status) on long multi-turn runs.
 
   RequestSetupCallback* = proc() {.gcsafe, raises: [].}
@@ -80,7 +81,7 @@ proc dispatchAgent*(dispatcher: AgentDispatcher; request: AgentRequest): Future[
   ## FUTURE: This should spawn a worker thread. Blocked on dimscord's
   ## GC-safety with --threads:on.
   var result: AgentResult
-  result.channelId = request.channelId
+  result.surfaceId = request.surfaceId
 
   if dispatcher.active:
     {.cast(gcsafe), cast(raises: []).}:
@@ -92,9 +93,9 @@ proc dispatchAgent*(dispatcher: AgentDispatcher; request: AgentRequest): Future[
         var agentCfg = newAgentConfig(dispatcher.cfg)
         agentCfg.callerId = request.userId
         if dispatcher.turnCallback != nil:
-          let channelId = request.channelId
+          let surfaceId = request.surfaceId
           let cb = dispatcher.turnCallback
-          agentCfg.turnCallback = proc() {.gcsafe, raises: [].} = cb(channelId)
+          agentCfg.turnCallback = proc() {.gcsafe, raises: [].} = cb(surfaceId)
         let agentResult = runAgentLoop(agentCfg, dispatcher.llm, dispatcher.reg,
                                         mem, request.userInput,
                                         resumeSessionId = request.sessionId)
