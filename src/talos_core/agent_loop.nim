@@ -272,9 +272,13 @@ proc runAgentLoop*(
   # Guards every write in this run behind agentCfg.persist — a `/btw`-style
   # ephemeral side-question reads the current session's history for
   # context but must leave zero trace in it (see AgentConfig.persist).
-  proc persistMsg(msg: ChatMessage; tokensIn = 0; tokensOut = 0) =
+  # A template, not a closure: `memory` is a `var Memory` (value type, not
+  # ref) and can't be captured by a nested proc without violating Nim's
+  # memory safety — a template is expanded inline instead, so there's
+  # nothing to capture.
+  template persistMsg(msg: ChatMessage; tIn: int; tOut: int) =
     if agentCfg.persist:
-      memory.appendMessage(sid, msg, tokensIn = tokensIn, tokensOut = tokensOut)
+      memory.appendMessage(sid, msg, tokensIn = tIn, tokensOut = tOut)
 
   var messages: seq[ChatMessage] = @[]
   if resumeSessionId.len > 0:
@@ -286,11 +290,11 @@ proc runAgentLoop*(
   if messages.len == 0 and agentCfg.systemPrompt.len > 0:
     let sysMsg = ChatMessage(role: crSystem, content: agentCfg.systemPrompt)
     messages.add(sysMsg)
-    persistMsg(sysMsg)
+    persistMsg(sysMsg, 0, 0)
 
   let userMsg = ChatMessage(role: crUser, content: userInput)
   messages.add(userMsg)
-  persistMsg(userMsg)
+  persistMsg(userMsg, 0, 0)
 
   # Tool definitions are built once: the registry shouldn't mutate during
   # a single agent run.
@@ -326,7 +330,7 @@ proc runAgentLoop*(
     except LLMError as e:
       let errText = "LLM request failed: " & e.msg
       let errMsg = ChatMessage(role: crAssistant, content: errText)
-      persistMsg(errMsg)
+      persistMsg(errMsg, 0, 0)
       result.text = errText
       result.stopReason = asrError
       return
@@ -345,8 +349,8 @@ proc runAgentLoop*(
     )
     persistMsg(
       assistantMsg,
-      tokensIn = resp.usage.promptTokens,
-      tokensOut = resp.usage.completionTokens,
+      resp.usage.promptTokens,
+      resp.usage.completionTokens,
     )
     messages.add(assistantMsg)
 
@@ -376,7 +380,7 @@ proc runAgentLoop*(
         toolCallId: tc.id,
         content: formatToolResult(toolRes),
       )
-      persistMsg(toolMsg)
+      persistMsg(toolMsg, 0, 0)
       messages.add(toolMsg)
 
     # Loop detection runs *after* executing this turn's tool calls so we
@@ -392,7 +396,7 @@ proc runAgentLoop*(
           "Loop detected: a tool was called " & $loopThreshold &
           " times with identical arguments. Stopping."
       let stopMsg = ChatMessage(role: crAssistant, content: stopText)
-      persistMsg(stopMsg)
+      persistMsg(stopMsg, 0, 0)
       result.text = stopText
       result.stopReason = asrLoopDetected
       return
@@ -400,7 +404,7 @@ proc runAgentLoop*(
   # Fell off the end of the loop without a final text answer.
   let stopText = "Max iterations reached (" & $maxIter & "). Stopping."
   let stopMsg = ChatMessage(role: crAssistant, content: stopText)
-  persistMsg(stopMsg)
+  persistMsg(stopMsg, 0, 0)
   result.text = stopText
   result.stopReason = asrMaxIterations
 
