@@ -72,6 +72,10 @@ suite "Permission Framework":
     check getToolRisk("read_file") == riskLow
     check getToolRisk("search") == riskLow
 
+  test "getToolRisk - browser and email are riskHigh":
+    check getToolRisk("browser") == riskHigh
+    check getToolRisk("email") == riskHigh
+
   test "getToolRisk - unknown tool defaults to riskMedium":
     check getToolRisk("unknown_tool") == riskMedium
     check getToolRisk("custom_plugin") == riskMedium

@@ -16,6 +16,8 @@ type
 proc getToolRisk*(toolName: string): ToolRiskLevel =
   case toolName
   of "shell", "bash", "execute": riskHigh
+  of "browser": riskHigh    ## real-world side effect: browses on the user's behalf
+  of "email": riskHigh      ## real-world side effect: can send mail on the user's behalf
   of "file_write", "delete_file": riskMedium
   of "file_read", "read_file", "search": riskLow
   else: riskMedium
