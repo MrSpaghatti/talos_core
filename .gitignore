@@ -1,0 +1,16 @@
+nimcache/
+tests/tconfig
+tests/ttoken_counter
+tests/tmemory
+tests/tllm_client
+tests/ttool_registry
+tests/test_message_chunker
+tests/test_permission
+tests/test_file_path_validator
+tests/test_file_tool
+tests/test_mock_server
+tests/test_mcp_client
+tests/test_mcp_tool
+tests/test_persona
+tests/test_plan_executor
+tests/test_crash_report
