@@ -51,6 +51,10 @@ type
     active*: bool   ## true once cfg/llm/reg/dbPath are populated (production mode)
     turnCallback*: TurnCallback
     requestSetup*: RequestSetupCallback
+    systemPrompt*: string
+      ## Overrides agent_loop.DefaultSystemPrompt when non-empty. Lets a
+      ## product (e.g. talos_agent) give its agent an actual voice without
+      ## core dictating one — core's own default stays product-agnostic.
 
 
 proc newAgentDispatcher*(callback: AgentCallback): AgentDispatcher =
@@ -62,12 +66,13 @@ proc newAgentDispatcher*(callback: AgentCallback): AgentDispatcher =
 proc newAgentDispatcher*(callback: AgentCallback; cfg: TalosConfig;
                           llm: LLMClient; reg: ToolRegistry; dbPath: string;
                           turnCallback: TurnCallback = nil;
-                          requestSetup: RequestSetupCallback = nil): AgentDispatcher =
+                          requestSetup: RequestSetupCallback = nil;
+                          systemPrompt: string = ""): AgentDispatcher =
   ## Full constructor for production use (talos daemon).
   ## The callback is invoked on the event-loop thread when processing completes.
   AgentDispatcher(
     callback: callback, cfg: cfg, llm: llm, reg: reg, dbPath: dbPath, active: true,
-    turnCallback: turnCallback, requestSetup: requestSetup
+    turnCallback: turnCallback, requestSetup: requestSetup, systemPrompt: systemPrompt
   )
 
 proc dispatchAgent*(dispatcher: AgentDispatcher; request: AgentRequest): Future[void] {.async, gcsafe.} =
@@ -90,7 +95,11 @@ proc dispatchAgent*(dispatcher: AgentDispatcher; request: AgentRequest): Future[
           dispatcher.requestSetup()
         var mem = newMemory(dispatcher.dbPath)
         defer: mem.close()
-        var agentCfg = newAgentConfig(dispatcher.cfg)
+        var agentCfg =
+          if dispatcher.systemPrompt.len > 0:
+            newAgentConfig(dispatcher.cfg, systemPrompt = dispatcher.systemPrompt)
+          else:
+            newAgentConfig(dispatcher.cfg)
         agentCfg.callerId = request.userId
         if dispatcher.turnCallback != nil:
           let surfaceId = request.surfaceId
