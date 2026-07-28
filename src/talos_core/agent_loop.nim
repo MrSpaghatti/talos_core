@@ -82,6 +82,13 @@ type
       ## known. Injected into tool-call args as `_callerId` before
       ## execution so tools that need per-caller permission checks (e.g.
       ## file_write) can see the actual requester. Empty for CLI/web runs.
+    persist*: bool
+      ## Whether this run writes to `memory` at all. True for normal
+      ## turns. False for an ephemeral side-question (e.g. `/btw`) that
+      ## should see the current session's history for context but leave
+      ## no trace in it — neither the question nor the answer is ever
+      ## appended, so it never appears in search/history and doesn't
+      ## affect what later turns see.
 
   AgentStats* = object
     ## Counters returned alongside the agent response, useful for tests
@@ -129,6 +136,7 @@ proc newAgentConfig*(
       if loopDetectionThreshold > 0: loopDetectionThreshold
       else: DefaultLoopDetectionThreshold,
     systemPrompt: systemPrompt,
+    persist: true,
   )
 
 proc defaultAgentConfig*(): AgentConfig =
@@ -139,6 +147,7 @@ proc defaultAgentConfig*(): AgentConfig =
     loopDetectionThreshold: DefaultLoopDetectionThreshold,
     systemPrompt: DefaultSystemPrompt,
     delegation: defaultDelegationConfig(),
+    persist: true,
   )
 
 # ---------------------------------------------------------------------------
@@ -254,24 +263,34 @@ proc runAgentLoop*(
   ## have been logged against it).
   let sid =
     if resumeSessionId.len > 0: resumeSessionId
-    else: memory.newSession()
+    elif agentCfg.persist: memory.newSession()
+    else: ""    ## ephemeral run with no prior session — nothing to read
+                ## or write, so no DB row is needed at all.
   result.sessionId = sid
   result.stopReason = asrError    # overwritten below
 
+  # Guards every write in this run behind agentCfg.persist — a `/btw`-style
+  # ephemeral side-question reads the current session's history for
+  # context but must leave zero trace in it (see AgentConfig.persist).
+  proc persistMsg(msg: ChatMessage; tokensIn = 0; tokensOut = 0) =
+    if agentCfg.persist:
+      memory.appendMessage(sid, msg, tokensIn = tokensIn, tokensOut = tokensOut)
+
   var messages: seq[ChatMessage] = @[]
   if resumeSessionId.len > 0:
-    memory.ensureSession(sid)
+    if agentCfg.persist:
+      memory.ensureSession(sid)
     messages = memory.getHistory(sid)
 
   # First turn on this session: seed the system prompt.
   if messages.len == 0 and agentCfg.systemPrompt.len > 0:
     let sysMsg = ChatMessage(role: crSystem, content: agentCfg.systemPrompt)
     messages.add(sysMsg)
-    memory.appendMessage(sid, sysMsg)
+    persistMsg(sysMsg)
 
   let userMsg = ChatMessage(role: crUser, content: userInput)
   messages.add(userMsg)
-  memory.appendMessage(sid, userMsg)
+  persistMsg(userMsg)
 
   # Tool definitions are built once: the registry shouldn't mutate during
   # a single agent run.
@@ -307,7 +326,7 @@ proc runAgentLoop*(
     except LLMError as e:
       let errText = "LLM request failed: " & e.msg
       let errMsg = ChatMessage(role: crAssistant, content: errText)
-      memory.appendMessage(sid, errMsg)
+      persistMsg(errMsg)
       result.text = errText
       result.stopReason = asrError
       return
@@ -324,8 +343,7 @@ proc runAgentLoop*(
       content: resp.content,
       toolCalls: resp.toolCalls,
     )
-    memory.appendMessage(
-      sid,
+    persistMsg(
       assistantMsg,
       tokensIn = resp.usage.promptTokens,
       tokensOut = resp.usage.completionTokens,
@@ -358,7 +376,7 @@ proc runAgentLoop*(
         toolCallId: tc.id,
         content: formatToolResult(toolRes),
       )
-      memory.appendMessage(sid, toolMsg)
+      persistMsg(toolMsg)
       messages.add(toolMsg)
 
     # Loop detection runs *after* executing this turn's tool calls so we
@@ -374,7 +392,7 @@ proc runAgentLoop*(
           "Loop detected: a tool was called " & $loopThreshold &
           " times with identical arguments. Stopping."
       let stopMsg = ChatMessage(role: crAssistant, content: stopText)
-      memory.appendMessage(sid, stopMsg)
+      persistMsg(stopMsg)
       result.text = stopText
       result.stopReason = asrLoopDetected
       return
@@ -382,7 +400,7 @@ proc runAgentLoop*(
   # Fell off the end of the loop without a final text answer.
   let stopText = "Max iterations reached (" & $maxIter & "). Stopping."
   let stopMsg = ChatMessage(role: crAssistant, content: stopText)
-  memory.appendMessage(sid, stopMsg)
+  persistMsg(stopMsg)
   result.text = stopText
   result.stopReason = asrMaxIterations
 
