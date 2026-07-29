@@ -189,6 +189,82 @@ suite "model_role TOML parsing (task-13)":
     loadPersonasFromStream(reg, stream)
     check: reg.getPersona("explorer").modelRole == "smol"
 
+  test "persona with specialty set is parsed (task-17)":
+    var reg = newPersonaRegistry()
+    let stream = newStringStream(
+      "[personas.reviewer]\nspecialty = \"code review, quality, lint\"\n")
+    loadPersonasFromStream(reg, stream)
+    check: reg.getPersona("reviewer").specialty == "code review, quality, lint"
+
+
+suite "routeToDelegate (task-17)":
+  proc registeredReg(): PersonaRegistry =
+    result = newPersonaRegistry()
+    registerPersona(result, PersonaConfig(
+      name: "explorer",
+      specialty: "explore, search, find, locate code, grep",
+    ))
+    registerPersona(result, PersonaConfig(
+      name: "reviewer",
+      specialty: "code review, review, quality, lint, critique",
+    ))
+    registerPersona(result, PersonaConfig(
+      name: "generic",
+      specialty: "",
+    ))
+
+  test "an explicit persona always wins, without inspecting the task":
+    let reg = registeredReg()
+    check: routeToDelegate(reg, "totally unrelated text",
+      explicitPersona = "reviewer") == "reviewer"
+
+  test "an explicit persona wins even if it isn't registered (validated by the caller, not the router)":
+    let reg = registeredReg()
+    check: routeToDelegate(reg, "anything",
+      explicitPersona = "nonexistent") == "nonexistent"
+
+  test "a task description matching the explorer's specialty routes to explorer":
+    let reg = registeredReg()
+    check: routeToDelegate(reg,
+      "please find the file that defines the login handler") == "explorer"
+
+  test "a task description matching the reviewer's specialty routes to reviewer":
+    let reg = registeredReg()
+    check: routeToDelegate(reg,
+      "do a code review of this pull request for quality issues") == "reviewer"
+
+  test "the persona with the most keyword matches wins over a single-keyword match":
+    var reg = newPersonaRegistry()
+    registerPersona(reg, PersonaConfig(name: "a", specialty: "review"))
+    registerPersona(reg, PersonaConfig(name: "b", specialty: "review, quality, lint"))
+    check: routeToDelegate(reg, "review this for quality and lint issues") == "b"
+
+  test "a tie goes to whichever matching persona was registered first":
+    var reg = newPersonaRegistry()
+    registerPersona(reg, PersonaConfig(name: "first", specialty: "review"))
+    registerPersona(reg, PersonaConfig(name: "second", specialty: "review"))
+    check: routeToDelegate(reg, "review this") == "first"
+
+  test "no keyword match falls back to a persona literally named \"default\"":
+    var reg = registeredReg()
+    registerPersona(reg, PersonaConfig(name: "default", specialty: ""))
+    check: routeToDelegate(reg, "something with zero matching keywords at all") == "default"
+
+  test "no keyword match and no default persona raises PersonaError":
+    let reg = registeredReg()
+    expect PersonaError:
+      discard routeToDelegate(reg, "something with zero matching keywords at all")
+
+  test "an explicitly passed defaultPersona overrides the \"default\" convention":
+    var reg = registeredReg()
+    registerPersona(reg, PersonaConfig(name: "fallback_persona", specialty: ""))
+    check: routeToDelegate(reg, "no match here",
+      defaultPersona = "fallback_persona") == "fallback_persona"
+
+  test "keyword matching is case-insensitive":
+    let reg = registeredReg()
+    check: routeToDelegate(reg, "CODE REVIEW please") == "reviewer"
+
 
 suite "System prompt defaults":
 

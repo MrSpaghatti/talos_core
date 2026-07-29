@@ -31,6 +31,12 @@ type
     delegateEnabled*: bool
     maxDelegationDepth*: int
     maxDelegationsPerRun*: int
+    specialty*: string
+      ## Comma-separated keywords/phrases describing what this persona is
+      ## suited for (e.g. "code review, testing, quality"), consulted by
+      ## `routeToDelegate` (task-17) when a `delegate` call doesn't name a
+      ## persona explicitly. "" means this persona is never auto-routed to
+      ## — it can still be delegated to by explicit name.
 
   PersonaRegistry* = ref object
     personas*: OrderedTable[string, PersonaConfig]
@@ -185,6 +191,8 @@ proc loadPersonasFromStream*(reg: var PersonaRegistry; stream: Stream) =
           buf.maxDelegationsPerRun = parseInt(event.value)
         except ValueError:
           discard
+      of "specialty":
+        buf.specialty = event.value
       else:
         discard
     of cfgOption:
@@ -285,3 +293,69 @@ proc scopedRegistry*(
     if allowNonEmpty and not allowSet.contains(name):
       continue
     result.register(tool)
+
+# ---------------------------------------------------------------------------
+# Subagent dispatch routing (task-17)
+# ---------------------------------------------------------------------------
+
+const DefaultRoutingPersonaName* = "default"
+  ## A persona registered under this name is the routing fallback consulted
+  ## by `routeToDelegate` when no persona's `specialty` matches the task
+  ## description — i.e. "configuring a default persona" (per task-17's
+  ## acceptance criteria) means simply registering a persona named
+  ## "default" in personas.toml, no separate config surface needed.
+
+proc specialtyKeywords(persona: PersonaConfig): seq[string] =
+  persona.specialty.split(',').mapIt(it.strip().toLowerAscii()).filterIt(it.len > 0)
+
+proc routeToDelegate*(
+    reg: PersonaRegistry;
+    taskDescription: string;
+    explicitPersona: string = "";
+    defaultPersona: string = DefaultRoutingPersonaName;
+): string =
+  ## Picks which persona a `delegate` call should route to.
+  ##
+  ## `explicitPersona`, if non-empty, always wins outright — the router
+  ## never overrides a caller's manual choice, and doesn't even inspect
+  ## `taskDescription` in that case.
+  ##
+  ## Otherwise, each registered persona's `specialty` (comma-separated
+  ## keywords/phrases) is matched as a case-insensitive substring against
+  ## `taskDescription`; the persona with the most matching keywords wins,
+  ## ties going to whichever matching persona was registered first. This
+  ## is a deliberately simple rules-based classifier rather than a cheap
+  ## LLM call (task-13's "smol" role would be the natural home for that
+  ## upgrade later) — deterministic and instant, no network dependency for
+  ## a decision this cheap to get right most of the time.
+  ##
+  ## If no persona's specialty matches at all, falls back to
+  ## `defaultPersona` (default: a persona literally named "default", if
+  ## one is registered). Raises PersonaError if there's no match and no
+  ## usable default — silently guessing wrong on a delegate call is worse
+  ## than failing loudly, since the entire point of routing is picking the
+  ## *right* child agent for the subtask.
+  if explicitPersona.len > 0:
+    return explicitPersona.toLowerAscii()
+
+  let taskLower = taskDescription.toLowerAscii()
+  var bestName = ""
+  var bestScore = 0
+  for name, pc in reg.personas:
+    var score = 0
+    for kw in specialtyKeywords(pc):
+      if taskLower.contains(kw):
+        inc score
+    if score > bestScore:
+      bestScore = score
+      bestName = name
+
+  if bestName.len > 0:
+    return bestName
+
+  if defaultPersona.len > 0 and reg.hasPersona(defaultPersona):
+    return defaultPersona.toLowerAscii()
+
+  raise newException(PersonaError,
+    "routeToDelegate: no persona's specialty matched the task description" &
+    ", and no usable default persona (\"" & defaultPersona & "\") is registered")
