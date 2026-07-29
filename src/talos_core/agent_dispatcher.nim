@@ -10,7 +10,7 @@
 ## --threads:on, so the dispatcher remains synchronous.
 
 import std/[asyncdispatch, options]
-import config, llm_client, tool_registry, agent_loop, memory
+import config, llm_client, tool_registry, agent_loop, memory, persona, advisor
 
 type
   AgentRequest* = object
@@ -55,6 +55,11 @@ type
       ## Overrides agent_loop.DefaultSystemPrompt when non-empty. Lets a
       ## product (e.g. talos_agent) give its agent an actual voice without
       ## core dictating one — core's own default stays product-agnostic.
+    advisorEnabled*: bool
+      ## task-16: whether to run the advisor role after each dispatched
+      ## turn. `advisorPersona`/`advisorLlm` are only consulted when true.
+    advisorPersona*: PersonaConfig
+    advisorLlm*: LLMClient
 
 
 proc newAgentDispatcher*(callback: AgentCallback): AgentDispatcher =
@@ -67,12 +72,16 @@ proc newAgentDispatcher*(callback: AgentCallback; cfg: TalosConfig;
                           llm: LLMClient; reg: ToolRegistry; dbPath: string;
                           turnCallback: TurnCallback = nil;
                           requestSetup: RequestSetupCallback = nil;
-                          systemPrompt: string = ""): AgentDispatcher =
+                          systemPrompt: string = "";
+                          advisorPersona: PersonaConfig = PersonaConfig();
+                          advisorLlm: LLMClient = LLMClient();
+                          advisorEnabled: bool = false): AgentDispatcher =
   ## Full constructor for production use (talos daemon).
   ## The callback is invoked on the event-loop thread when processing completes.
   AgentDispatcher(
     callback: callback, cfg: cfg, llm: llm, reg: reg, dbPath: dbPath, active: true,
-    turnCallback: turnCallback, requestSetup: requestSetup, systemPrompt: systemPrompt
+    turnCallback: turnCallback, requestSetup: requestSetup, systemPrompt: systemPrompt,
+    advisorPersona: advisorPersona, advisorLlm: advisorLlm, advisorEnabled: advisorEnabled,
   )
 
 proc dispatchAgent*(dispatcher: AgentDispatcher; request: AgentRequest): Future[void] {.async, gcsafe.} =
@@ -87,6 +96,7 @@ proc dispatchAgent*(dispatcher: AgentDispatcher; request: AgentRequest): Future[
   ## GC-safety with --threads:on.
   var result: AgentResult
   result.surfaceId = request.surfaceId
+  var alreadyCalledBack = false
 
   if dispatcher.active:
     {.cast(gcsafe), cast(raises: []).}:
@@ -105,12 +115,31 @@ proc dispatchAgent*(dispatcher: AgentDispatcher; request: AgentRequest): Future[
           let surfaceId = request.surfaceId
           let cb = dispatcher.turnCallback
           agentCfg.turnCallback = proc() {.gcsafe, raises: [].} = cb(surfaceId)
+        # task-16: deliver any note the advisor left after a prior turn on
+        # this session, then clear it (delivered exactly once).
+        if dispatcher.advisorEnabled and request.sessionId.len > 0:
+          agentCfg.advisorNote = takePendingNote(request.sessionId)
         let agentResult = runAgentLoop(agentCfg, dispatcher.llm, dispatcher.reg,
                                         mem, request.userInput,
                                         resumeSessionId = request.sessionId)
         result.responseText = agentResult.text
         if agentResult.stopReason == asrError:
           result.error = some(agentResult.text)
+
+        # Reply to the surface *before* running the advisor — task-16's
+        # "not a blocking review step" requirement, satisfied here by not
+        # making the user wait on the advisor rather than by literal
+        # thread-level concurrency (see advisor.nim's module doc for why).
+        if dispatcher.callback != nil:
+          dispatcher.callback(result)
+          alreadyCalledBack = true
+
+        if dispatcher.advisorEnabled and request.sessionId.len > 0 and
+           agentResult.stopReason != asrError:
+          let transcript = mem.getHistory(request.sessionId)
+          let noteOpt = runAdvisor(dispatcher.advisorPersona, dispatcher.advisorLlm, transcript)
+          if noteOpt.isSome:
+            setPendingNote(request.sessionId, noteOpt.get().note)
       except CatchableError as e:
         result.responseText = e.msg
         result.error = some(e.msg)
@@ -118,7 +147,7 @@ proc dispatchAgent*(dispatcher: AgentDispatcher; request: AgentRequest): Future[
     # Placeholder: used by tests that construct via newAgentDispatcher(callback)
     result.responseText = "Agent response for: " & request.userInput
 
-  if dispatcher.callback != nil:
+  if not alreadyCalledBack and dispatcher.callback != nil:
     dispatcher.callback(result)
 
 proc startDispatcher*(dispatcher: AgentDispatcher) =

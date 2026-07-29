@@ -89,6 +89,15 @@ type
       ## no trace in it — neither the question nor the answer is ever
       ## appended, so it never appears in search/history and doesn't
       ## affect what later turns see.
+    advisorNote*: string
+      ## If non-empty, injected as an extra system-role message right
+      ## before this turn's first LLM call — visible to the model for
+      ## this turn only, never persisted to memory. This is the advisor
+      ## role's (task-16) delivery mechanism: a second agent session
+      ## reviews the primary's transcript after a turn completes and, if
+      ## it has something to say, that note rides in here on the *next*
+      ## turn — in-context, but never part of the primary's own
+      ## persisted session history.
 
   AgentStats* = object
     ## Counters returned alongside the agent response, useful for tests
@@ -295,6 +304,15 @@ proc runAgentLoop*(
   let userMsg = ChatMessage(role: crUser, content: userInput)
   messages.add(userMsg)
   persistMsg(userMsg, 0, 0)
+
+  # Advisor note (task-16): added to this call's in-memory message list
+  # only — deliberately not run through persistMsg, since it must never
+  # become part of this session's persisted history.
+  if agentCfg.advisorNote.len > 0:
+    messages.add(ChatMessage(
+      role: crSystem,
+      content: "[Advisor note from a previous turn] " & agentCfg.advisorNote,
+    ))
 
   # Tool definitions are built once: the registry shouldn't mutate during
   # a single agent run.
