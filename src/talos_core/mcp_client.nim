@@ -108,6 +108,34 @@ proc jsonRpcError(msg: string; code: int; data: JsonNode = nil): JsonNode =
 # HTTP transport
 # ---------------------------------------------------------------------------
 
+proc unwrapSseJson(contentType, body: string): string =
+  ## Streamable-HTTP MCP servers may answer a single POST with the JSON-RPC
+  ## response wrapped in SSE event framing (`event: message\ndata: {...}`)
+  ## rather than a plain JSON body — confirmed against the real
+  ## `@modelcontextprotocol/server-everything` reference server, which
+  ## rejects a request that doesn't `Accept: text/event-stream` outright.
+  ## Extracts the last event's `data:` payload when the content type says
+  ## SSE; returns `body` unchanged otherwise (plain "http" transport
+  ## servers, which just return JSON directly, are unaffected).
+  if "text/event-stream" notin contentType:
+    return body
+  var lastData = ""
+  var current = ""
+  for rawLine in body.splitLines():
+    var line = rawLine
+    if line.len > 0 and line[^1] == '\r':
+      line = line[0 ..< line.len - 1]
+    if line.len == 0:
+      if current.len > 0:
+        lastData = current
+        current = ""
+    elif line.startsWith("data:"):
+      let val = line["data:".len .. ^1].strip()
+      current = if current.len > 0: current & "\n" & val else: val
+  if current.len > 0:
+    lastData = current  # trailing event with no final blank line
+  if lastData.len > 0: lastData else: body
+
 proc callMethod*(client: McpClient; mcpMethod: string; params: JsonNode = nil): JsonNode =
   ## Sends a JSON-RPC request to the MCP server and returns the parsed response.
   ## Raises on transport errors, HTTP errors, or JSON-RPC error responses.
@@ -119,7 +147,10 @@ proc callMethod*(client: McpClient; mcpMethod: string; params: JsonNode = nil): 
       client.cfg.url,
       httpMethod = HttpPost,
       body = $reqBody,
-      headers = newHttpHeaders({"Content-Type": "application/json"}),
+      headers = newHttpHeaders({
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+      }),
     )
   except CatchableError as e:
     var err = newException(McpConnectionError,
@@ -135,9 +166,12 @@ proc callMethod*(client: McpClient; mcpMethod: string; params: JsonNode = nil): 
     err.serverUrl = client.cfg.url
     raise err
 
+  let contentType = response.headers.getOrDefault("Content-Type")
+  let jsonBody = unwrapSseJson(contentType, response.body)
+
   var respNode: JsonNode
   try:
-    respNode = parseJson(response.body)
+    respNode = parseJson(jsonBody)
   except JsonParsingError as e:
     var err = newException(McpProtocolError,
       "MCP server at '" & client.cfg.url &
@@ -227,7 +261,10 @@ proc initialize*(client: McpClient; serverName: string = "talos"): string =
       client.cfg.url,
       httpMethod = HttpPost,
       body = $notif,
-      headers = newHttpHeaders({"Content-Type": "application/json"}),
+      headers = newHttpHeaders({
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+      }),
     )
   except CatchableError:
     discard  # notification is best-effort per JSON-RPC spec
