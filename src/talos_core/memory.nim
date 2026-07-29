@@ -3,9 +3,10 @@
 ## Persistent conversation memory backed by SQLite with FTS5 full-text search.
 ##
 ## Schema:
-##   sessions  — one row per conversation session
-##   messages  — one row per chat message, linked to a session
-##   messages_fts — FTS5 virtual table mirroring messages.content
+##   sessions        — one row per conversation session
+##   messages        — one row per chat message, linked to a session
+##   messages_fts    — FTS5 virtual table mirroring messages.content
+##   retained_facts  — durable, explicitly-retained facts + their embeddings
 ##
 ## Features:
 ##   - newSession(): creates a new session, returns its ID
@@ -13,18 +14,26 @@
 ##   - getHistory(): retrieves all messages for a session as seq[ChatMessage]
 ##   - searchHistory(): full-text search across all message content
 ##   - getTokenUsage(): aggregated token stats for a session
+##   - retainFact()/recallFacts(): explicit durable memory + semantic search
+##     over it (see talos_agent's retain/recall/reflect tools) — brute-force
+##     cosine similarity in Nim, not a SQL vector index. Deliberately not
+##     wired to every appended message: only what's explicitly retained gets
+##     embedded, keeping the semantic store curated rather than diluted by
+##     routine chat turns, and keeping embedding cost bounded/opt-in.
 ##
 ## WAL mode is enabled for better concurrent read performance.
 ## Tool calls and tool results are stored as JSON strings.
 ##
 ## Out of scope (deferred):
-##   - Vector / embedding search
+##   - A real ANN index (sqlite-vec) — brute-force is exact and fast enough
+##     at single-user message volumes; revisit if that stops being true.
 ##   - Memory summarization / compaction
 ##   - Cross-session retrieval
 
 import db_connector/db_sqlite
-import std/[json, strutils, os]
+import std/[json, strutils, os, base64, algorithm]
 import talos_core/config
+import talos_core/embeddings
 import talos_core/llm_client
 import talos_core/util
 
@@ -52,6 +61,22 @@ type
     createdAt*: string
     updatedAt*: string
     messageCount*: int
+
+  RetainedFact* = object
+    ## A durable fact explicitly written via retainFact().
+    id*: int64
+    sessionId*: string        ## may be "" for facts not tied to a session
+    content*: string
+    model*: string             ## embedding model used
+    createdAt*: string
+
+  RetainedFactMatch* = object
+    ## A single recallFacts() hit, ranked by cosine similarity.
+    id*: int64
+    sessionId*: string
+    content*: string
+    score*: float32
+    createdAt*: string
 
   MemoryError* = object of CatchableError
     ## Raised on unrecoverable database errors.
@@ -87,6 +112,26 @@ proc toolCallsToJson(tcs: seq[ToolCall]): string =
     obj["arguments"] = %tc.arguments
     arr.add(obj)
   return $arr
+
+proc packEmbedding(v: seq[float32]): string =
+  ## Packs a float32 vector into a base64-encoded string for TEXT-column
+  ## storage. Base64 (not a raw BLOB bind) deliberately, to stay on
+  ## memory.nim's existing varargs[string] exec/query calls everywhere else
+  ## in this module — a raw blob would need SqlPrepared-level bindParam for
+  ## openArray[byte], since the varargs exec path does plain string
+  ## substitution and would corrupt on the embedded NUL bytes float32
+  ## patterns routinely contain.
+  var raw = newString(v.len * 4)
+  if v.len > 0:
+    copyMem(addr raw[0], unsafeAddr v[0], v.len * 4)
+  base64.encode(raw)
+
+proc unpackEmbedding(b64: string): seq[float32] =
+  let raw = base64.decode(b64)
+  let n = raw.len div 4
+  result = newSeq[float32](n)
+  if n > 0:
+    copyMem(addr result[0], unsafeAddr raw[0], n * 4)
 
 proc jsonToToolCalls(s: string): seq[ToolCall] =
   ## Deserialises a JSON array string back to seq[ToolCall].
@@ -179,6 +224,17 @@ proc initSchema(db: DbConn) =
       INSERT INTO messages_fts(rowid, content)
       VALUES (new.id, new.content);
     END
+  """)
+
+  db.exec(sql"""
+    CREATE TABLE IF NOT EXISTS retained_facts (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id  TEXT    NOT NULL DEFAULT '',
+      content     TEXT    NOT NULL,
+      embedding   TEXT    NOT NULL,   -- base64-packed float32 vector
+      model       TEXT    NOT NULL,
+      created_at  TEXT    NOT NULL
+    )
   """)
 
 # ---------------------------------------------------------------------------
@@ -381,6 +437,76 @@ proc getTokenUsage*(m: Memory; sessionId: string): TokenUsage =
     completionTokens: parseInt(row[1]),
     totalTokens:      parseInt(row[2]),
   )
+
+proc retainFact*(
+    m: Memory;
+    content: string;
+    embedding: seq[float32];
+    model: string;
+    sessionId: string = "";
+): int64 =
+  ## Durably stores a fact and its embedding. Returns the new row's id.
+  let ts = nowIso()
+  result = m.db.insertID(sql"""
+    INSERT INTO retained_facts (session_id, content, embedding, model, created_at)
+    VALUES (?, ?, ?, ?, ?)
+  """, sessionId, content, packEmbedding(embedding), model, ts)
+
+proc clearRetainedFacts*(m: Memory; model: string = "") =
+  ## Deletes retained facts. If `model` is given, only deletes facts
+  ## embedded with that model (useful when switching embedding models —
+  ## old vectors aren't comparable to new-model query embeddings).
+  if model.len > 0:
+    m.db.exec(sql"DELETE FROM retained_facts WHERE model = ?", model)
+  else:
+    m.db.exec(sql"DELETE FROM retained_facts")
+
+proc listRetainedFacts*(m: Memory; limit: int = 100): seq[RetainedFact] =
+  ## Returns the most recently retained facts, up to `limit`.
+  result = @[]
+  for row in m.db.fastRows(sql"""
+    SELECT id, session_id, content, model, created_at
+    FROM retained_facts
+    ORDER BY id DESC
+    LIMIT ?
+  """, $limit):
+    result.add(RetainedFact(
+      id: parseBiggestInt(row[0]),
+      sessionId: row[1],
+      content: row[2],
+      model: row[3],
+      createdAt: row[4],
+    ))
+
+proc recallFacts*(
+    m: Memory;
+    queryEmbedding: seq[float32];
+    model: string;
+    topK: int = 10;
+    minScore: float32 = 0.0;
+): seq[RetainedFactMatch] =
+  ## Brute-force cosine similarity search over all retained facts embedded
+  ## with `model` (facts from a different/prior model are excluded — their
+  ## vectors aren't comparable). Returns the top `topK` matches at or above
+  ## `minScore`, ranked highest-first.
+  var candidates: seq[RetainedFactMatch] = @[]
+  for row in m.db.fastRows(sql"""
+    SELECT id, session_id, content, embedding, created_at
+    FROM retained_facts
+    WHERE model = ?
+  """, model):
+    let vec = unpackEmbedding(row[3])
+    let score = cosineSimilarity(queryEmbedding, vec)
+    if score >= minScore:
+      candidates.add(RetainedFactMatch(
+        id: parseBiggestInt(row[0]),
+        sessionId: row[1],
+        content: row[2],
+        score: score,
+        createdAt: row[4],
+      ))
+  candidates.sort(proc(a, b: RetainedFactMatch): int = cmp(b.score, a.score))
+  result = if candidates.len > topK: candidates[0 ..< topK] else: candidates
 
 proc resolveDbPath*(cfg: TalosConfig): string =
   ## Expands `~` in the configured DB path and ensures the parent dir

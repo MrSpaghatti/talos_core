@@ -54,6 +54,33 @@ suite "defaultConfig":
     check cfg.maxLoopIterations == 10
     check cfg.dbPath == "~/.local/share/talos/talos.db"
     check cfg.openrouterApiKey == ""
+    check cfg.embeddingModel == "openai/text-embedding-3-large"
+    check cfg.embeddingEndpoint == "https://openrouter.ai/api/v1"
+
+suite "embedding config":
+  test "TOML embedding_model and embedding_endpoint override defaults":
+    let tmpDir = getTempDir() / "talos_test_embedding_cfg"
+    createDir(tmpDir)
+    defer: removeDir(tmpDir)
+    let cfgFile = tmpDir / "config.toml"
+    writeTempFile(cfgFile, """
+embedding_model = "openai/text-embedding-3-small"
+embedding_endpoint = "https://example.com/api/v1"
+""")
+    let cfg = loadConfig(configPath = cfgFile, envFilePath = tmpDir / "nope.env")
+    check cfg.embeddingModel == "openai/text-embedding-3-small"
+    check cfg.embeddingEndpoint == "https://example.com/api/v1"
+
+  test "TALOS_EMBEDDING_MODEL env var overrides TOML":
+    withEnv("TALOS_EMBEDDING_MODEL", "google/gemini-embedding-001"):
+      let cfg = loadConfig(envFilePath = "/nonexistent/.env")
+      check cfg.embeddingModel == "google/gemini-embedding-001"
+
+  test "empty embedding_model raises ConfigError":
+    var cfg = defaultConfig()
+    cfg.embeddingModel = ""
+    expect(ConfigError):
+      validate(cfg)
 
 # ---------------------------------------------------------------------------
 # Suite: parseEnvFile

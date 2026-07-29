@@ -39,6 +39,10 @@ type
     openrouterApiKey*: string   ## loaded from .env or env var
     webPort*: int               ## web UI listen port
     mcpServers*: seq[McpServerConfig]  ## Configured MCP server endpoints
+    embeddingModel*: string     ## e.g. "openai/text-embedding-3-large"
+    embeddingEndpoint*: string  ## Embeddings always route via OpenRouter
+                                 ## regardless of `provider` — see
+                                 ## scripts/eval_embeddings.nim for why.
 
   ConfigError* = object of CatchableError
 
@@ -54,6 +58,11 @@ const
   DefaultMcpTimeoutMs* = 30_000
   DefaultDbPath* = "~/.local/share/talos/talos.db"
   DefaultWebPort* = 8080
+  ## Mirrors embeddings.DefaultEmbeddingModel — kept as a literal here
+  ## rather than importing talos_core/embeddings, since config.nim stays a
+  ## leaf module with no client-library dependencies.
+  DefaultEmbeddingModel* = "openai/text-embedding-3-large"
+  DefaultEmbeddingEndpoint* = DefaultOpenrouterEndpoint
 
 proc defaultConfig*(): TalosConfig =
   ## Returns a TalosConfig populated with all defaults.
@@ -70,6 +79,8 @@ proc defaultConfig*(): TalosConfig =
     openrouterApiKey: "",
     webPort: DefaultWebPort,
     mcpServers: @[],
+    embeddingModel: DefaultEmbeddingModel,
+    embeddingEndpoint: DefaultEmbeddingEndpoint,
   )
 
 proc parseEnvFile*(path: string): seq[tuple[key, val: string]] =
@@ -224,6 +235,8 @@ proc applyTomlSection(cfg: var TalosConfig; section, key, val: string) =
     of "web_port":
       let n = parseInt(val)
       cfg.webPort = n
+    of "embedding_model":    cfg.embeddingModel = val
+    of "embedding_endpoint": cfg.embeddingEndpoint = val
     else: discard
   else: discard
 
@@ -432,6 +445,14 @@ proc applyEnvVars(cfg: var TalosConfig) =
         raise newException(ConfigError,
           "MERCURY_WEB_PORT must be an integer, got: " & oldWebPortStr)
 
+  let embeddingModel = getEnv("TALOS_EMBEDDING_MODEL")
+  if embeddingModel.len > 0:
+    cfg.embeddingModel = embeddingModel
+
+  let embeddingEndpoint = getEnv("TALOS_EMBEDDING_ENDPOINT")
+  if embeddingEndpoint.len > 0:
+    cfg.embeddingEndpoint = embeddingEndpoint
+
   # Apply MCP server configuration from environment variables.
   applyEnvMcpServers(cfg)
 
@@ -458,6 +479,10 @@ proc validate*(cfg: TalosConfig) =
   if cfg.webPort <= 0 or cfg.webPort > 65535:
     raise newException(ConfigError,
       "web_port must be between 1 and 65535, got: " & $cfg.webPort)
+  if cfg.embeddingModel.len == 0:
+    raise newException(ConfigError, "embedding_model must not be empty")
+  if cfg.embeddingEndpoint.len == 0:
+    raise newException(ConfigError, "embedding_endpoint must not be empty")
 
   # Warn if OpenRouter is selected but no API key is configured.
   if cfg.provider == "openrouter" and cfg.openrouterApiKey.len == 0:
@@ -531,6 +556,10 @@ proc loadConfig*(
       except ValueError:
         raise newException(ConfigError,
           "TALOS_WEB_PORT must be an integer, got: " & val)
+    of "TALOS_EMBEDDING_MODEL":
+      result.embeddingModel = val
+    of "TALOS_EMBEDDING_ENDPOINT":
+      result.embeddingEndpoint = val
     of "MERCURY_PROVIDER":
       stderr.writeLine("Warning: MERCURY_PROVIDER in .env is deprecated, use TALOS_PROVIDER instead")
       result.provider = val

@@ -76,6 +76,13 @@ suite "Permission Framework":
     check getToolRisk("browser") == riskHigh
     check getToolRisk("email") == riskHigh
 
+  test "getToolRisk - retain is riskMedium":
+    check getToolRisk("retain") == riskMedium
+
+  test "getToolRisk - recall and reflect are riskLow":
+    check getToolRisk("recall") == riskLow
+    check getToolRisk("reflect") == riskLow
+
   test "getToolRisk - unknown tool defaults to riskMedium":
     check getToolRisk("unknown_tool") == riskMedium
     check getToolRisk("custom_plugin") == riskMedium

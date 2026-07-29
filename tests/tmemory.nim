@@ -427,3 +427,88 @@ suite "WAL mode concurrency":
       echo "writer thread error: " & wr.error
     if not rr.ok:
       echo "reader thread error: " & rr.error
+
+# ---------------------------------------------------------------------------
+# Suite: retainFact and recallFacts
+# ---------------------------------------------------------------------------
+
+suite "retainFact and recallFacts":
+  test "retainFact returns a positive id and listRetainedFacts sees it":
+    var m = makeMemory()
+    let id = m.retainFact("the sky is blue", @[1.0'f32, 0.0'f32, 0.0'f32], "test-model")
+    check id > 0
+    let facts = m.listRetainedFacts()
+    check facts.len == 1
+    check facts[0].content == "the sky is blue"
+    check facts[0].model == "test-model"
+
+  test "recallFacts ranks closest vector first":
+    var m = makeMemory()
+    discard m.retainFact("fact A", @[1.0'f32, 0.0'f32], "test-model")
+    discard m.retainFact("fact B", @[0.0'f32, 1.0'f32], "test-model")
+    discard m.retainFact("fact C", @[0.9'f32, 0.1'f32], "test-model")
+    let matches = m.recallFacts(@[1.0'f32, 0.0'f32], "test-model", topK = 10)
+    check matches.len == 3
+    check matches[0].content == "fact A"
+    check matches[1].content == "fact C"
+    check matches[2].content == "fact B"
+    check matches[0].score > matches[1].score
+    check matches[1].score > matches[2].score
+
+  test "recallFacts respects topK":
+    var m = makeMemory()
+    for i in 0 ..< 5:
+      discard m.retainFact("fact " & $i, @[1.0'f32, i.float32], "test-model")
+    let matches = m.recallFacts(@[1.0'f32, 0.0'f32], "test-model", topK = 2)
+    check matches.len == 2
+
+  test "recallFacts respects minScore":
+    var m = makeMemory()
+    discard m.retainFact("close", @[1.0'f32, 0.0'f32], "test-model")
+    discard m.retainFact("orthogonal", @[0.0'f32, 1.0'f32], "test-model")
+    let matches = m.recallFacts(@[1.0'f32, 0.0'f32], "test-model", minScore = 0.5'f32)
+    check matches.len == 1
+    check matches[0].content == "close"
+
+  test "recallFacts excludes facts from a different embedding model":
+    var m = makeMemory()
+    discard m.retainFact("old model fact", @[1.0'f32, 0.0'f32], "old-model")
+    discard m.retainFact("new model fact", @[1.0'f32, 0.0'f32], "new-model")
+    let matches = m.recallFacts(@[1.0'f32, 0.0'f32], "new-model")
+    check matches.len == 1
+    check matches[0].content == "new model fact"
+
+  test "embedding survives the base64 pack/unpack round trip at float32 precision":
+    var m = makeMemory()
+    let original = @[0.123456'f32, -0.987654'f32, 3.14159'f32, 0.0'f32, -0.0'f32]
+    discard m.retainFact("precision check", original, "test-model")
+    let matches = m.recallFacts(original, "test-model")
+    check matches.len == 1
+    check abs(matches[0].score - 1.0'f32) < 0.0001'f32
+
+  test "clearRetainedFacts with no model arg deletes everything":
+    var m = makeMemory()
+    discard m.retainFact("a", @[1.0'f32], "model-1")
+    discard m.retainFact("b", @[1.0'f32], "model-2")
+    m.clearRetainedFacts()
+    check m.listRetainedFacts().len == 0
+
+  test "clearRetainedFacts with a model arg only deletes that model's facts":
+    var m = makeMemory()
+    discard m.retainFact("a", @[1.0'f32], "model-1")
+    discard m.retainFact("b", @[1.0'f32], "model-2")
+    m.clearRetainedFacts("model-1")
+    let remaining = m.listRetainedFacts()
+    check remaining.len == 1
+    check remaining[0].model == "model-2"
+
+  test "retainFact stores sessionId when given":
+    var m = makeMemory()
+    let sid = m.newSession()
+    discard m.retainFact("session-scoped fact", @[1.0'f32], "test-model", sessionId = sid)
+    check m.listRetainedFacts()[0].sessionId == sid
+
+  test "recallFacts on an empty store returns no results":
+    var m = makeMemory()
+    let matches = m.recallFacts(@[1.0'f32, 0.0'f32], "test-model")
+    check matches.len == 0

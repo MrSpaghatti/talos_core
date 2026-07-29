@@ -1,4 +1,4 @@
-version       = "1.5.0"
+version       = "1.6.0"
 author        = "Talos"
 description   = "Talos core shared library"
 license       = "MIT"
@@ -12,6 +12,7 @@ task test, "Run all tests":
   exec "nim c -d:ssl -r tests/ttoken_counter.nim"
   exec "nim c -d:ssl --threads:on -r tests/tmemory.nim"
   exec "nim c -d:ssl --threads:on -r tests/tllm_client.nim"
+  exec "nim c -d:ssl --threads:on -r tests/tembeddings.nim"
   exec "nim c -d:ssl -r tests/ttool_registry.nim"
   exec "nim c -d:ssl -r tests/test_message_chunker.nim"
   exec "nim c -d:ssl -r tests/test_permission.nim"

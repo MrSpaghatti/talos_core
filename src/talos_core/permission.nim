@@ -19,7 +19,9 @@ proc getToolRisk*(toolName: string): ToolRiskLevel =
   of "browser": riskHigh    ## real-world side effect: browses on the user's behalf
   of "email": riskHigh      ## real-world side effect: can send mail on the user's behalf
   of "file_write", "delete_file": riskMedium
+  of "retain": riskMedium  ## writes durable long-term memory, same tier as file_write
   of "file_read", "read_file", "search": riskLow
+  of "recall", "reflect": riskLow  ## read-only queries over retained memory
   else: riskMedium
 
 proc isAdmin*(userId: string, acl: ToolAcl): bool =
