@@ -1,6 +1,6 @@
 ## Tests for talos_core/config.nim
 
-import std/[os, unittest]
+import std/[os, tables, unittest]
 import talos_core/config, talos_core/mcp_client
 
 # ---------------------------------------------------------------------------
@@ -599,6 +599,74 @@ suite "mcpServers env var loading":
           check cfg.mcpServers[0].url == "http://first:8080"
           check cfg.mcpServers[1].url == "http://second:9000"
           check cfg.mcpServers[2].url == "http://third:7000"
+
+# ---------------------------------------------------------------------------
+# Suite: model-routing roles (task-13) — TOML loading
+# ---------------------------------------------------------------------------
+
+suite "roles TOML loading":
+  let tmpDir = getTempDir() / "talos_test_roles_toml"
+  setup: createDir(tmpDir)
+  teardown: removeDir(tmpDir)
+
+  test "roles empty by default":
+    let cfg = defaultConfig()
+    check cfg.roles.len == 0
+
+  test "a config with no [roles.*] sections behaves identically to today":
+    let cfgFile = tmpDir / "config.toml"
+    writeTempFile(cfgFile, """
+provider = "openrouter"
+openrouter_model = "anthropic/claude-sonnet-4"
+""")
+    let cfg = loadConfig(configPath = cfgFile, envFilePath = "/nonexistent/.env")
+    check cfg.roles.len == 0
+    check cfg.provider == "openrouter"
+    check cfg.openrouterModel == "anthropic/claude-sonnet-4"
+
+  test "loads a single role from TOML":
+    let cfgFile = tmpDir / "config.toml"
+    writeTempFile(cfgFile, """
+[roles.plan]
+provider = "openrouter"
+model = "anthropic/claude-opus-4"
+""")
+    let cfg = loadConfig(configPath = cfgFile, envFilePath = "/nonexistent/.env")
+    check cfg.roles.len == 1
+    check cfg.roles["plan"].provider == "openrouter"
+    check cfg.roles["plan"].model == "anthropic/claude-opus-4"
+    check cfg.roles["plan"].fallback.len == 0
+
+  test "loads multiple roles with a fallback chain":
+    let cfgFile = tmpDir / "config.toml"
+    writeTempFile(cfgFile, """
+[roles.default]
+provider = "openrouter"
+model = "openrouter/auto"
+
+[roles.smol]
+provider = "openrouter"
+model = "openrouter/auto:cheap"
+fallback = "openrouter/some-other-cheap-model, openrouter/yet-another"
+""")
+    let cfg = loadConfig(configPath = cfgFile, envFilePath = "/nonexistent/.env")
+    check cfg.roles.len == 2
+    check cfg.roles["default"].model == "openrouter/auto"
+    check cfg.roles["smol"].fallback == @["openrouter/some-other-cheap-model", "openrouter/yet-another"]
+
+  test "a role may omit provider/model to inherit the legacy fields":
+    let cfgFile = tmpDir / "config.toml"
+    writeTempFile(cfgFile, """
+provider = "openrouter"
+openrouter_model = "openrouter/auto"
+
+[roles.plan]
+model = "anthropic/claude-opus-4"
+""")
+    let cfg = loadConfig(configPath = cfgFile, envFilePath = "/nonexistent/.env")
+    # Stored as-written (blank provider) — resolveRole fills the blank in.
+    check cfg.roles["plan"].provider.len == 0
+    check cfg.roles["plan"].model == "anthropic/claude-opus-4"
 
   test "gap in index stops parsing":
     withEnv("MERCURY_MCP_SERVER_0_URL", "http://first:8080"):

@@ -15,9 +15,16 @@
 ## Product-specific config (e.g. Discord) is loaded separately by the
 ## owning product — see talos_agent/discord/discord_config.nim.
 
-import std/[os, parsecfg, strutils, streams]
+import std/[os, parsecfg, strutils, streams, tables]
 
 type
+  ModelRoleConfig* = object
+    ## A named model-routing role (e.g. "default", "plan", "smol"). See
+    ## `[roles.*]` in the TOML config.
+    provider*: string   ## "" means inherit TalosConfig.provider
+    model*: string      ## "" means inherit the provider's configured model
+    fallback*: seq[string]  ## additional models to try, same provider, in order
+
   McpServerConfig* = object
     ## Configuration for a single MCP server endpoint.
     name*: string          ## Human-readable name from TOML section (e.g. "filesystem")
@@ -44,6 +51,10 @@ type
     embeddingEndpoint*: string  ## Embeddings always route via OpenRouter
                                  ## regardless of `provider` — see
                                  ## scripts/eval_embeddings.nim for why.
+    roles*: OrderedTable[string, ModelRoleConfig]
+      ## Named model-routing roles from `[roles.*]`. Empty means only the
+      ## implicit `default` role exists, built from provider/openrouterModel/
+      ## vllmModel — see build_llm_client.resolveRole.
 
   ConfigError* = object of CatchableError
 
@@ -82,6 +93,7 @@ proc defaultConfig*(): TalosConfig =
     mcpServers: @[],
     embeddingModel: DefaultEmbeddingModel,
     embeddingEndpoint: DefaultEmbeddingEndpoint,
+    roles: initOrderedTable[string, ModelRoleConfig](),
   )
 
 proc parseEnvFile*(path: string): seq[tuple[key, val: string]] =
@@ -150,6 +162,22 @@ proc parseMcpServerEntry(entry: McpServerEntry): McpServerConfig =
     timeoutMs: if entry.timeoutMs > 0: entry.timeoutMs else: DefaultMcpTimeoutMs,
     enabled: if entry.enabledExplicit: entry.enabled else: true,
     transport: if entry.transport in ["http", "sse"]: entry.transport else: "http",
+  )
+
+type
+  RoleEntry = object
+    ## Temporary accumulator for a single [roles.<name>] block during TOML
+    ## parsing, mirroring McpServerEntry's pattern above.
+    name: string
+    provider: string
+    model: string
+    fallback: string  ## raw comma-separated value, split via parseCsvList
+
+proc parseRoleEntry(entry: RoleEntry): ModelRoleConfig =
+  ModelRoleConfig(
+    provider: entry.provider,
+    model: entry.model,
+    fallback: parseCsvList(entry.fallback),
   )
 
 proc applyEnvMcpServers*(cfg: var TalosConfig) =
@@ -269,6 +297,11 @@ proc loadTomlFile(cfg: var TalosConfig; path: string) =
   var currentMcpServer = ""
   var mcpBuf = McpServerEntry()
 
+  # Accumulators for [roles.<name>] blocks, same pattern as MCP servers above.
+  var roleEntries: seq[RoleEntry] = @[]
+  var currentRole = ""
+  var roleBuf = RoleEntry()
+
   var currentSection = ""
   while true:
     let event = next(parser)
@@ -276,17 +309,25 @@ proc loadTomlFile(cfg: var TalosConfig; path: string) =
     of cfgEof:
       break
     of cfgSectionStart:
-      # New section — flush any pending MCP server entry first.
+      # New section — flush any pending MCP server / role entry first.
       if currentMcpServer.len > 0 and mcpBuf.name.len > 0:
         mcpEntries.add(mcpBuf)
+      if currentRole.len > 0 and roleBuf.name.len > 0:
+        roleEntries.add(roleBuf)
 
       currentSection = event.section
       let sec = currentSection.toLowerAscii()
       if sec.startsWith("mcp_servers."):
         currentMcpServer = sec
         mcpBuf = McpServerEntry(name: sec)
+        currentRole = ""
+      elif sec.startsWith("roles."):
+        currentRole = sec
+        roleBuf = RoleEntry(name: sec[6 .. ^1])
+        currentMcpServer = ""
       else:
         currentMcpServer = ""
+        currentRole = ""
     of cfgKeyValuePair:
       if currentMcpServer.len > 0:
         # Inside a [mcp_servers.<name>] block — accumulate into mcpBuf.
@@ -306,6 +347,14 @@ proc loadTomlFile(cfg: var TalosConfig; path: string) =
         of "transport":
           mcpBuf.transport = event.value.toLowerAscii()
         else: discard
+      elif currentRole.len > 0:
+        # Inside a [roles.<name>] block — accumulate into roleBuf.
+        let k = event.key.toLowerAscii()
+        case k
+        of "provider": roleBuf.provider = event.value
+        of "model":    roleBuf.model = event.value
+        of "fallback": roleBuf.fallback = event.value
+        else: discard
       else:
         try:
           applyTomlSection(cfg, currentSection, event.key, event.value)
@@ -318,13 +367,19 @@ proc loadTomlFile(cfg: var TalosConfig; path: string) =
       raise newException(ConfigError,
         "Parse error in " & path & ": " & event.msg)
 
-  # Flush any remaining MCP server entry.
+  # Flush any remaining MCP server / role entry.
   if currentMcpServer.len > 0 and mcpBuf.name.len > 0:
     mcpEntries.add(mcpBuf)
+  if currentRole.len > 0 and roleBuf.name.len > 0:
+    roleEntries.add(roleBuf)
 
   # Apply all collected MCP server entries.
   for entry in mcpEntries:
     cfg.mcpServers.add(parseMcpServerEntry(entry))
+
+  # Apply all collected role entries.
+  for entry in roleEntries:
+    cfg.roles[entry.name] = parseRoleEntry(entry)
 
 proc applyEnvVars(cfg: var TalosConfig) =
   ## Applies environment variable overrides to cfg.

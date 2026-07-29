@@ -175,6 +175,21 @@ suite "delegate_enabled TOML defaulting":
     check: reg.getPersona("explicit_on").delegateEnabled == true
 
 
+suite "model_role TOML parsing (task-13)":
+  test "persona without model_role defaults to empty (\"default\" role)":
+    var reg = newPersonaRegistry()
+    let stream = newStringStream("[personas.plain]\nsystem_prompt = \"hi\"\n")
+    loadPersonasFromStream(reg, stream)
+    check: reg.getPersona("plain").modelRole.len == 0
+
+  test "persona with model_role set is parsed":
+    var reg = newPersonaRegistry()
+    let stream = newStringStream(
+      "[personas.explorer]\nmodel_role = \"smol\"\n")
+    loadPersonasFromStream(reg, stream)
+    check: reg.getPersona("explorer").modelRole == "smol"
+
+
 suite "System prompt defaults":
 
   test "persona system prompt is empty by default":

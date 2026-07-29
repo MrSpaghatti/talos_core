@@ -16,3 +16,4 @@ tests/test_plan_executor
 tests/test_crash_report
 tests/test_heartbeat
 tests/tembeddings
+tests/tbuild_llm_client

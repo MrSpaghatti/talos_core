@@ -16,6 +16,11 @@ type
     name*: string
     systemPrompt*: string
     model*: string
+    modelRole*: string
+      ## Named role (task-13, build_llm_client.resolveRole) to route this
+      ## persona's child-agent LLM calls through, e.g. "smol" for cheap
+      ## subagent fan-out. "" (the default) means "default" role — i.e.
+      ## reuse the parent's own LLM client unchanged.
     temperature*: float
     maxIterations*: int
     toolsAllow*: seq[string]
@@ -141,6 +146,8 @@ proc loadPersonasFromStream*(reg: var PersonaRegistry; stream: Stream) =
         buf.systemPrompt = event.value
       of "model":
         buf.model = event.value
+      of "model_role":
+        buf.modelRole = event.value
       of "temperature":
         try:
           buf.temperature = parseFloat(event.value)
