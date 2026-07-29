@@ -31,7 +31,7 @@
 ##   - Cross-session retrieval
 
 import db_connector/db_sqlite
-import std/[json, strutils, os, base64, algorithm]
+import std/[json, strutils, os, base64, algorithm, tables]
 import talos_core/config
 import talos_core/embeddings
 import talos_core/llm_client
@@ -77,6 +77,14 @@ type
     content*: string
     score*: float32
     createdAt*: string
+
+  HybridSearchResult* = object
+    ## A single searchHybrid() hit, from either source.
+    kind*: string          ## "message" (FTS5) or "fact" (semantic recall)
+    sessionId*: string
+    content*: string
+    createdAt*: string
+    rrfScore*: float32      ## Reciprocal Rank Fusion score — see searchHybrid
 
   MemoryError* = object of CatchableError
     ## Raised on unrecoverable database errors.
@@ -507,6 +515,56 @@ proc recallFacts*(
       ))
   candidates.sort(proc(a, b: RetainedFactMatch): int = cmp(b.score, a.score))
   result = if candidates.len > topK: candidates[0 ..< topK] else: candidates
+
+proc searchHybrid*(
+    m: Memory;
+    query: string;
+    embeddingClient: EmbeddingClient;
+    topK: int = 10;
+): seq[HybridSearchResult] =
+  ## Merges FTS5 keyword search (over all messages, via searchHistory) with
+  ## semantic recall (over retained facts, via recallFacts) into one ranked
+  ## list, using Reciprocal Rank Fusion (RRF) rather than blending raw
+  ## scores directly — FTS5's bm25 rank magnitude and cosine similarity
+  ## aren't on comparable scales, but RRF combines ranked lists using only
+  ## each item's *position*, sidestepping that entirely. Standard constant
+  ## k=60 (Cormack et al.). If the embeddings backend is unavailable (no
+  ## API key, network error), silently falls back to FTS5-only results —
+  ## the cold-start/no-embeddings-configured case task-05 calls for.
+  const RrfK = 60.0'f32
+  var items = initTable[string, HybridSearchResult]()
+  var scores = initTable[string, float32]()
+
+  let ftsHits = m.searchHistory(query)
+  for i, h in ftsHits:
+    let key = "msg#" & $h.messageId
+    items[key] = HybridSearchResult(
+      kind: "message", sessionId: h.sessionId, content: h.content, createdAt: h.createdAt)
+    scores[key] = scores.getOrDefault(key, 0.0'f32) + 1.0'f32 / (RrfK + (i + 1).float32)
+
+  try:
+    let emb = embeddingClient.getEmbedding(query)
+    let factHits = m.recallFacts(emb.vector, embeddingClient.model, topK = topK)
+    for i, f in factHits:
+      let key = "fact#" & $f.id
+      items[key] = HybridSearchResult(
+        kind: "fact", sessionId: f.sessionId, content: f.content, createdAt: f.createdAt)
+      scores[key] = scores.getOrDefault(key, 0.0'f32) + 1.0'f32 / (RrfK + (i + 1).float32)
+  except CatchableError:
+    discard
+
+  var ranked: seq[tuple[key: string, score: float32]] = @[]
+  for k, s in scores:
+    ranked.add((k, s))
+  ranked.sort(proc(a, b: tuple[key: string, score: float32]): int = cmp(b.score, a.score))
+
+  result = @[]
+  for (k, s) in ranked:
+    var item = items[k]
+    item.rrfScore = s
+    result.add(item)
+    if result.len >= topK:
+      break
 
 proc resolveDbPath*(cfg: TalosConfig): string =
   ## Expands `~` in the configured DB path and ensures the parent dir

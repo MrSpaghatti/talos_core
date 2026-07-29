@@ -5,7 +5,9 @@
 
 import std/[unittest, strutils, os, times]
 import talos_core/llm_client
+import talos_core/embeddings
 import talos_core/memory
+import talos_core/testkit/mock_llm_server
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -512,3 +514,57 @@ suite "retainFact and recallFacts":
     var m = makeMemory()
     let matches = m.recallFacts(@[1.0'f32, 0.0'f32], "test-model")
     check matches.len == 0
+
+# ---------------------------------------------------------------------------
+# Suite: searchHybrid
+# ---------------------------------------------------------------------------
+
+var hybridSrv = startMockServer()
+
+proc hybridEmbedClient(): EmbeddingClient =
+  newEmbeddingClient(baseUrlFor(hybridSrv), "test-key", "test-model", maxRetries = 1)
+
+const HybridEmbedBody = """{"data": [{"embedding": [1.0, 0.0]}], "usage": {"total_tokens": 1}}"""
+
+suite "searchHybrid":
+  test "merges FTS and semantic hits into one ranked list":
+    var m = makeMemory()
+    let sid = m.newSession()
+    m.appendMessage(sid, userMsg("the quick brown fox"))
+    discard m.retainFact("a fact about foxes", @[1.0'f32, 0.0'f32], "test-model")
+    resetMock(hybridSrv)
+    hybridSrv.enqueue("200 OK", HybridEmbedBody)
+    let hits = m.searchHybrid("fox", hybridEmbedClient())
+    var kinds: seq[string] = @[]
+    for h in hits: kinds.add(h.kind)
+    check "message" in kinds
+    check "fact" in kinds
+
+  test "falls back to FTS-only results when the embeddings backend errors":
+    var m = makeMemory()
+    let sid = m.newSession()
+    m.appendMessage(sid, userMsg("hello world"))
+    resetMock(hybridSrv)
+    hybridSrv.enqueue("500 Internal Server Error", """{"error": {"message": "boom"}}""")
+    let hits = m.searchHybrid("hello", hybridEmbedClient())
+    check hits.len == 1
+    check hits[0].kind == "message"
+
+  test "respects topK across the merged list":
+    var m = makeMemory()
+    let sid = m.newSession()
+    for i in 0 ..< 5:
+      m.appendMessage(sid, userMsg("keyword message " & $i))
+    resetMock(hybridSrv)
+    hybridSrv.enqueue("500 Internal Server Error", """{"error": {"message": "boom"}}""")
+    let hits = m.searchHybrid("keyword", hybridEmbedClient(), topK = 2)
+    check hits.len == 2
+
+  test "empty store with no query matches returns empty":
+    var m = makeMemory()
+    resetMock(hybridSrv)
+    hybridSrv.enqueue("500 Internal Server Error", """{"error": {"message": "boom"}}""")
+    let hits = m.searchHybrid("nothing matches this", hybridEmbedClient())
+    check hits.len == 0
+
+stopMockServer(hybridSrv)
