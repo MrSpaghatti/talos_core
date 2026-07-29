@@ -12,7 +12,7 @@
 ## `discoverTools()` to get a sequence of `McpTool` objects, then pass them
 ## to `registerMcpTool()` in `mcp_tool.nim` to add them to a `ToolRegistry`.
 
-import std/[httpclient, json, times, strutils, os]
+import std/[httpclient, json, times, strutils, os, asyncdispatch, asyncstreams]
 
 import talos_core/config
 import util
@@ -330,3 +330,155 @@ proc discoverTools*(configs: seq[McpServerConfig]): seq[McpTool] =
       stderr.writeLine("Warning: MCP server '" & cfg.url &
                        "' unavailable: " & e.msg)
       continue
+
+# ---------------------------------------------------------------------------
+# SSE / streaming transport
+# ---------------------------------------------------------------------------
+##
+## Runs on `AsyncHttpClient` (separate from the synchronous `HttpClient`
+## used above for tools/list and tools/call), since an SSE connection stays
+## open indefinitely and needs to be read incrementally as data arrives —
+## `AsyncHttpClient.request()` returns as soon as headers are parsed and
+## streams the body into `AsyncResponse.bodyStream` in the background
+## (confirmed via std/httpclient's `parseResponse`: for AsyncHttpClient it
+## kicks off `parseBody` as a background future rather than awaiting it),
+## so an indefinite connection with no Content-Length doesn't block here
+## the way it would on the sync client.
+
+type
+  McpSseEvent* = object
+    eventType*: string        ## "message" if the server didn't set one
+    data*: string
+    id*: string                ## empty if the server didn't set one
+
+  McpSseCallback* = proc(event: McpSseEvent) {.gcsafe, raises: [].}
+
+  SseParser* = object
+    ## Incremental SSE (text/event-stream) parser. Feed it raw byte chunks
+    ## as they arrive off the wire — chunk boundaries don't have to align
+    ## with line or event boundaries, `feed` buffers correctly across calls.
+    buf: string
+    evType: string
+    evData: seq[string]
+    evId: string
+
+  McpStreamingClient* = ref object
+    http*: AsyncHttpClient
+    baseUrl*: string           ## e.g. "http://localhost:8080/sse"
+    authToken*: string
+    onEvent*: McpSseCallback
+    running*: bool
+    lastEventId*: string
+
+proc newSseParser*(): SseParser =
+  SseParser(buf: "", evType: "", evData: @[], evId: "")
+
+proc feed*(p: var SseParser; chunk: string): seq[McpSseEvent] =
+  ## Feeds a raw chunk of the response body into the parser. Returns every
+  ## complete event dispatched as a result (usually 0 or 1, but a chunk can
+  ## contain more than one blank-line-terminated event at once).
+  result = @[]
+  p.buf.add(chunk)
+  while true:
+    let nlIdx = p.buf.find('\n')
+    if nlIdx < 0:
+      break
+    var line = p.buf[0 ..< nlIdx]
+    p.buf = p.buf[nlIdx + 1 .. ^1]
+    if line.len > 0 and line[^1] == '\r':
+      line = line[0 ..< line.len - 1]
+
+    if line.len == 0:
+      # Blank line: dispatch the event accumulated so far (per the SSE
+      # spec, an event with no "data:" lines at all is not dispatched).
+      if p.evData.len > 0:
+        result.add(McpSseEvent(
+          eventType: (if p.evType.len > 0: p.evType else: "message"),
+          data: p.evData.join("\n"),
+          id: p.evId,
+        ))
+      p.evType = ""
+      p.evData = @[]
+      p.evId = ""
+    elif line[0] == ':':
+      discard  # comment / heartbeat line — ignored per spec
+    elif line.startsWith("event:"):
+      p.evType = line["event:".len .. ^1].strip()
+    elif line.startsWith("data:"):
+      p.evData.add(line["data:".len .. ^1].strip())
+    elif line.startsWith("id:"):
+      p.evId = line["id:".len .. ^1].strip()
+    elif line.startsWith("retry:"):
+      discard  # reconnection-delay hint — not used, McpStreamingClient
+               # has its own fixed reconnect backoff (see `run`)
+    else:
+      discard  # unknown field name — ignored per spec
+
+proc newMcpStreamingClient*(
+    baseUrl: string;
+    authToken: string = "";
+    onEvent: McpSseCallback = nil;
+): McpStreamingClient =
+  McpStreamingClient(
+    http: newAsyncHttpClient(),
+    baseUrl: baseUrl.strip(trailing = true, chars = {'/'}),
+    authToken: authToken,
+    onEvent: onEvent,
+    running: false,
+    lastEventId: "",
+  )
+
+proc listen*(client: McpStreamingClient): Future[void] {.async.} =
+  ## Connects to the SSE endpoint and dispatches events via `onEvent` until
+  ## `stop()` is called or the connection is closed by the server. Does not
+  ## reconnect on disconnect — see `run()` for a reconnecting wrapper.
+  if not client.http.isNil:
+    try: client.http.close()
+    except CatchableError: discard
+  client.http = newAsyncHttpClient()
+  client.http.headers = newHttpHeaders({
+    "Accept": "text/event-stream",
+    "Cache-Control": "no-cache",
+    # Each listen() call is a fresh, independent connection — SSE
+    # "reconnect" means exactly that, not multiplexing a request onto a
+    # kept-alive socket. Forcing this explicitly also sidesteps
+    # asynchttpclient/asynchttpserver keep-alive edge cases where a second
+    # request on a reused connection silently never reaches the server.
+    "Connection": "close",
+  })
+  if client.authToken.len > 0:
+    client.http.headers["Authorization"] = "Bearer " & client.authToken
+  if client.lastEventId.len > 0:
+    client.http.headers["Last-Event-Id"] = client.lastEventId
+
+  let resp = await client.http.request(client.baseUrl, httpMethod = HttpGet)
+  var parser = newSseParser()
+  client.running = true
+  while client.running:
+    let (hasData, chunk) = await resp.bodyStream.read()
+    if not hasData:
+      break
+    for event in parser.feed(chunk):
+      if event.id.len > 0:
+        client.lastEventId = event.id
+      if not client.onEvent.isNil:
+        client.onEvent(event)
+
+proc run*(client: McpStreamingClient; reconnectDelayMs: int = 1000): Future[void] {.async.} =
+  ## Runs `listen()` in a loop, reconnecting (carrying `Last-Event-Id`
+  ## forward for resume) on any disconnect, until `stop()` is called.
+  client.running = true
+  while client.running:
+    try:
+      await client.listen()
+    except CatchableError:
+      discard
+    if client.running:
+      await sleepAsync(reconnectDelayMs)
+
+proc stop*(client: McpStreamingClient) =
+  client.running = false
+  try:
+    client.http.close()
+  except CatchableError:
+    discard

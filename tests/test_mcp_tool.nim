@@ -5,6 +5,24 @@ import talos_core/config
 import talos_core/mcp_client
 import talos_core/mcp_tool
 import talos_core/tool_registry
+import talos_core/testkit/mock_llm_server
+
+# refreshMcpServerTools/registerMcpServerSse below need a *synchronous*
+# McpClient round-trip. mcp_tool.nim's mock (mock_mcp_server.nim) is a
+# single-threaded async server sharing this test's event loop, which
+# deadlocks against a blocking client on the same thread (see the comment
+# in test_mcp_client.nim). mock_llm_server's generic thread-based mock
+# doesn't have that problem — MCP is just JSON-RPC over HTTP POST, so a
+# path/method-agnostic FIFO responder works fine for these.
+
+const InitSuccessBody =
+  """{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"mock","version":"1.0"}}}"""
+
+proc newInitializedClient(server: MockServer): McpClient =
+  server.enqueue("200 OK", InitSuccessBody)
+  server.enqueue("200 OK", "{}")
+  result = newMcpClient(newMcpServerConfig(url = baseUrlFor(server)))
+  discard result.initialize()
 
 # ---------------------------------------------------------------------------
 # Tests: registerMcpTool
@@ -234,3 +252,137 @@ suite "mcp_tool execute proc error handling":
     let result = reg.execute("unreachable", %*{})
     check result.isError
     check result.output.contains("failed to connect")
+
+# ---------------------------------------------------------------------------
+# Tests: refreshMcpServerTools (tool_list_changed reconciliation)
+# ---------------------------------------------------------------------------
+
+suite "refreshMcpServerTools":
+  test "adds newly-listed tools and registers them":
+    let server = startMockServer()
+    defer: stopMockServer(server)
+    let client = newInitializedClient(server)
+    let reg = newToolRegistry()
+    var registered: seq[McpTool] = @[]
+
+    server.enqueue("200 OK", """{"jsonrpc":"2.0","id":2,"result":{"tools":[
+      {"name":"tool_a","description":"first tool","inputSchema":{"type":"object"}}
+    ]}}""")
+    refreshMcpServerTools(reg, client, registered)
+    check reg.has("tool_a")
+    check registered.len == 1
+
+  test "removes tools that disappeared from the server's list":
+    let server = startMockServer()
+    defer: stopMockServer(server)
+    let client = newInitializedClient(server)
+    let reg = newToolRegistry()
+    var registered: seq[McpTool] = @[]
+
+    server.enqueue("200 OK", """{"jsonrpc":"2.0","id":2,"result":{"tools":[
+      {"name":"tool_a","description":"first","inputSchema":{"type":"object"}}
+    ]}}""")
+    refreshMcpServerTools(reg, client, registered)
+    check reg.has("tool_a")
+
+    server.enqueue("200 OK", """{"jsonrpc":"2.0","id":3,"result":{"tools":[
+      {"name":"tool_b","description":"second","inputSchema":{"type":"object"}}
+    ]}}""")
+    refreshMcpServerTools(reg, client, registered)
+    check not reg.has("tool_a")
+    check reg.has("tool_b")
+    check registered.len == 1
+    check registered[0].name == "tool_b"
+
+  test "an unreachable server leaves the registry untouched":
+    let cfg = newMcpServerConfig(url = "http://localhost:19996/mcp", timeoutMs = 300)
+    var client = newMcpClient(cfg)
+    let reg = newToolRegistry()
+    reg.register(name = "existing", description = "", parameters = emptyParameters(),
+      execute = proc(args: JsonNode): ToolResult {.gcsafe.} = ToolResult(output: "ok"))
+    var registered = @[McpTool(server: "x", name: "existing", description: "")]
+    refreshMcpServerTools(reg, client, registered)
+    check reg.has("existing")
+    check registered.len == 1
+
+# ---------------------------------------------------------------------------
+# Tests: registerMcpServerSse / unregisterMcpServerSse
+#
+# These only exercise registerMcpServerSse's *synchronous* handshake path
+# (same mock/reasoning as refreshMcpServerTools above) — the live
+# tool_list_changed reaction is covered at the unit level by
+# refreshMcpServerTools (reconciliation logic) and by test_mcp_client.nim's
+# SseParser/McpStreamingClient suites (event parsing + dispatch +
+# reconnect), and end-to-end by the real MCP server integration test.
+# ---------------------------------------------------------------------------
+
+suite "registerMcpServerSse":
+  test "returns nil for a disabled server":
+    let cfg = newMcpServerConfig(url = "http://localhost:19995/mcp", enabled = false)
+    let reg = newToolRegistry()
+    let handle = registerMcpServerSse(reg, cfg)
+    check handle.isNil
+
+  test "returns nil and logs a warning for an unreachable server":
+    let cfg = newMcpServerConfig(url = "http://localhost:19994/mcp", timeoutMs = 300)
+    let reg = newToolRegistry()
+    let handle = registerMcpServerSse(reg, cfg)
+    check handle.isNil
+
+  test "registers initial tools from a real handshake and returns a live handle":
+    let server = startMockServer()
+    defer: stopMockServer(server)
+    server.enqueue("200 OK", InitSuccessBody)
+    server.enqueue("200 OK", "{}")
+    server.enqueue("200 OK", """{"jsonrpc":"2.0","id":2,"result":{"tools":[
+      {"name":"tool_a","description":"first tool","inputSchema":{"type":"object"}}
+    ]}}""")
+    let cfg = newMcpServerConfig(url = baseUrlFor(server))
+    let reg = newToolRegistry()
+
+    let handle = registerMcpServerSse(reg, cfg)
+    check not handle.isNil
+    check reg.has("tool_a")
+    check handle.registered.len == 1
+
+    unregisterMcpServerSse(reg, handle)
+    check not reg.has("tool_a")
+
+  test "unregisterMcpServerSse on a nil handle is a no-op, not a crash":
+    let reg = newToolRegistry()
+    unregisterMcpServerSse(reg, nil)
+
+suite "registerMcpServersWithHandles":
+  test "http-transport servers behave like registerMcpServer (backward compat)":
+    let server = startMockServer()
+    defer: stopMockServer(server)
+    server.enqueue("200 OK", InitSuccessBody)
+    server.enqueue("200 OK", "{}")
+    server.enqueue("200 OK", """{"jsonrpc":"2.0","id":2,"result":{"tools":[
+      {"name":"http_tool","description":"an http-transport tool","inputSchema":{"type":"object"}}
+    ]}}""")
+    let cfg = newMcpServerConfig(url = baseUrlFor(server))
+    let reg = newToolRegistry()
+
+    let res = registerMcpServersWithHandles(reg, @[cfg])
+    check res.toolCount == 1
+    check res.sseHandles.len == 0
+    check reg.has("http_tool")
+
+  test "sse-transport servers are registered and their handle is returned":
+    let server = startMockServer()
+    defer: stopMockServer(server)
+    server.enqueue("200 OK", InitSuccessBody)
+    server.enqueue("200 OK", "{}")
+    server.enqueue("200 OK", """{"jsonrpc":"2.0","id":2,"result":{"tools":[
+      {"name":"sse_tool","description":"an sse-transport tool","inputSchema":{"type":"object"}}
+    ]}}""")
+    var cfg = newMcpServerConfig(url = baseUrlFor(server))
+    cfg.transport = "sse"
+    let reg = newToolRegistry()
+
+    let res = registerMcpServersWithHandles(reg, @[cfg])
+    check res.toolCount == 1
+    check res.sseHandles.len == 1
+    check reg.has("sse_tool")
+    unregisterMcpServerSse(reg, res.sseHandles[0])

@@ -387,3 +387,123 @@ suite "mcp_tool strips _callerId on the wire":
     check "_callerId" notin wire
     check "discord-user-42" notin wire
     check "\"q\":\"hi\"" in wire
+
+# ---------------------------------------------------------------------------
+# SseParser — pure, no server needed
+# ---------------------------------------------------------------------------
+
+suite "SseParser":
+  test "a single complete event in one chunk dispatches once":
+    var p = newSseParser()
+    let events = p.feed("event: message\ndata: hello\n\n")
+    check events.len == 1
+    check events[0].eventType == "message"
+    check events[0].data == "hello"
+
+  test "no eventType defaults to 'message'":
+    var p = newSseParser()
+    let events = p.feed("data: hi\n\n")
+    check events.len == 1
+    check events[0].eventType == "message"
+
+  test "multi-line data is joined with newlines":
+    var p = newSseParser()
+    let events = p.feed("data: line1\ndata: line2\n\n")
+    check events.len == 1
+    check events[0].data == "line1\nline2"
+
+  test "id field is captured":
+    var p = newSseParser()
+    let events = p.feed("id: 42\ndata: x\n\n")
+    check events.len == 1
+    check events[0].id == "42"
+
+  test "a chunk split mid-line is buffered correctly across feed() calls":
+    var p = newSseParser()
+    check p.feed("data: hel").len == 0
+    let events = p.feed("lo\n\n")
+    check events.len == 1
+    check events[0].data == "hello"
+
+  test "a chunk split mid-event (after a complete line) is buffered correctly":
+    var p = newSseParser()
+    check p.feed("event: custom\n").len == 0
+    check p.feed("data: partial\n").len == 0
+    let events = p.feed("\n")
+    check events.len == 1
+    check events[0].eventType == "custom"
+
+  test "two events in one chunk both dispatch":
+    var p = newSseParser()
+    let events = p.feed("data: one\n\ndata: two\n\n")
+    check events.len == 2
+    check events[0].data == "one"
+    check events[1].data == "two"
+
+  test "comment lines (starting with ':') are ignored":
+    var p = newSseParser()
+    let events = p.feed(": this is a heartbeat comment\ndata: real\n\n")
+    check events.len == 1
+    check events[0].data == "real"
+
+  test "an event with no data lines at all is not dispatched":
+    var p = newSseParser()
+    let events = p.feed("event: ping\n\n")
+    check events.len == 0
+
+  test "\\r\\n line endings are handled":
+    var p = newSseParser()
+    let events = p.feed("data: crlf\r\n\r\n")
+    check events.len == 1
+    check events[0].data == "crlf"
+
+  test "retry: field is ignored without affecting parsing":
+    var p = newSseParser()
+    let events = p.feed("retry: 3000\ndata: x\n\n")
+    check events.len == 1
+    check events[0].data == "x"
+
+# ---------------------------------------------------------------------------
+# McpStreamingClient — real async HTTP against the mock SSE server
+# ---------------------------------------------------------------------------
+
+suite "McpStreamingClient":
+  test "listen() dispatches events served by a real HTTP response":
+    let server = newMockMcpServer()
+    waitFor server.start()
+    defer: server.stop()
+    server.addSseEvent("message", "hello world")
+    server.addSseEvent("tool_list_changed", "{}")
+
+    var received: seq[McpSseEvent] = @[]
+    let client = newMcpStreamingClient(server.sseUrl(),
+      onEvent = proc(e: McpSseEvent) {.gcsafe, raises: [].} =
+        {.cast(gcsafe).}:
+          received.add(e))
+
+    proc runOnce() {.async.} =
+      let fut = client.listen()
+      # listen() runs until the server closes the connection (a
+      # non-chunked, finite mock response closes right after the body is
+      # sent), so it naturally completes on its own here.
+      await fut
+
+    discard waitFor runOnce().withTimeout(5000)
+    check received.len == 2
+    check received[0].eventType == "message"
+    check received[0].data == "hello world"
+    check received[1].eventType == "tool_list_changed"
+
+  test "lastEventId is tracked and sent as Last-Event-Id on reconnect":
+    let server = newMockMcpServer()
+    waitFor server.start()
+    defer: server.stop()
+    server.addSseEvent("message", "hi", id = "evt-7")
+
+    let client = newMcpStreamingClient(server.sseUrl())
+    discard waitFor client.listen().withTimeout(5000)
+    check client.lastEventId == "evt-7"
+
+    # A second connection should carry Last-Event-Id forward.
+    discard waitFor client.listen().withTimeout(5000)
+    check server.lastLastEventIdHeader == "evt-7"

@@ -25,6 +25,7 @@ type
     authToken*: string
     timeoutMs*: int
     enabled*: bool
+    transport*: string     ## "http" (default) or "sse"
 
   TalosConfig* = object
     provider*: string           ## "openrouter" or "vllm"
@@ -131,6 +132,7 @@ type
     timeoutMs*: int
     enabledExplicit*: bool  ## true if "enabled" was explicitly set in TOML/env
     enabled*: bool          ## the value (true unless explicitly set to false)
+    transport*: string      ## "" means unset — defaults to "http" below
 
 proc parseMcpServerEntry(entry: McpServerEntry): McpServerConfig =
   ## Converts a parsed `McpServerEntry` into a `McpServerConfig`, filling in
@@ -147,6 +149,7 @@ proc parseMcpServerEntry(entry: McpServerEntry): McpServerConfig =
     authToken: entry.authToken,
     timeoutMs: if entry.timeoutMs > 0: entry.timeoutMs else: DefaultMcpTimeoutMs,
     enabled: if entry.enabledExplicit: entry.enabled else: true,
+    transport: if entry.transport in ["http", "sse"]: entry.transport else: "http",
   )
 
 proc applyEnvMcpServers*(cfg: var TalosConfig) =
@@ -208,6 +211,12 @@ proc applyEnvMcpServers*(cfg: var TalosConfig) =
     if enabledStr.len > 0:
       entry.enabled = enabledStr.toLowerAscii() in @["1", "true", "yes", "on"]
       entry.enabledExplicit = true
+
+    let transportEnv = "TALOS_MCP_SERVER_" & $i & "_TRANSPORT"
+    let transportStr = getEnv(transportEnv)
+    if transportStr.len > 0:
+      entry.transport = transportStr.toLowerAscii()
+
     cfg.mcpServers.add(parseMcpServerEntry(entry))
     inc i
 proc applyTomlSection(cfg: var TalosConfig; section, key, val: string) =
@@ -294,6 +303,8 @@ proc loadTomlFile(cfg: var TalosConfig; path: string) =
         of "enabled":
           mcpBuf.enabled = event.value.toLowerAscii() in @["1", "true", "yes", "on"]
           mcpBuf.enabledExplicit = true
+        of "transport":
+          mcpBuf.transport = event.value.toLowerAscii()
         else: discard
       else:
         try:

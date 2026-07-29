@@ -421,6 +421,36 @@ enabled = true
     check cfg.mcpServers[0].authToken == "secret123"
     check cfg.mcpServers[0].timeoutMs == 5000
     check cfg.mcpServers[0].enabled == true
+    check cfg.mcpServers[0].transport == "http"
+
+  test "transport defaults to http when not set":
+    let cfgFile = tmpDir / "config.toml"
+    writeTempFile(cfgFile, """
+[mcp_servers.fst]
+url = "http://localhost:8080/mcp"
+""")
+    let cfg = loadConfig(configPath = cfgFile, envFilePath = "/nonexistent/.env")
+    check cfg.mcpServers[0].transport == "http"
+
+  test "transport = sse is parsed from TOML":
+    let cfgFile = tmpDir / "config.toml"
+    writeTempFile(cfgFile, """
+[mcp_servers.fst]
+url = "http://localhost:8080/mcp"
+transport = "sse"
+""")
+    let cfg = loadConfig(configPath = cfgFile, envFilePath = "/nonexistent/.env")
+    check cfg.mcpServers[0].transport == "sse"
+
+  test "an unrecognized transport value falls back to http":
+    let cfgFile = tmpDir / "config.toml"
+    writeTempFile(cfgFile, """
+[mcp_servers.fst]
+url = "http://localhost:8080/mcp"
+transport = "carrier-pigeon"
+""")
+    let cfg = loadConfig(configPath = cfgFile, envFilePath = "/nonexistent/.env")
+    check cfg.mcpServers[0].transport == "http"
 
   test "loads multiple MCP servers from TOML":
     let cfgFile = tmpDir / "config.toml"
@@ -529,6 +559,15 @@ suite "mcpServers env var loading":
           envFilePath = "/nonexistent/.env"
         )
         check cfg.mcpServers[0].authToken == "my-secret-token"
+
+  test "TALOS_MCP_SERVER_0_TRANSPORT sets transport":
+    withEnv("TALOS_MCP_SERVER_0_URL", "http://localhost:8080/mcp"):
+      withEnv("TALOS_MCP_SERVER_0_TRANSPORT", "sse"):
+        let cfg = loadConfig(
+          configPath = "/nonexistent/config.toml",
+          envFilePath = "/nonexistent/.env"
+        )
+        check cfg.mcpServers[0].transport == "sse"
 
   test "MERCURY_MCP_SERVER_0_TIMEOUT_MS sets timeout":
     withEnv("MERCURY_MCP_SERVER_0_URL", "http://localhost:8080/mcp"):

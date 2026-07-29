@@ -10,7 +10,7 @@
 ## `ToolExecuteProc` signature and can live inside a `ToolRegistry` without
 ## leaking exceptions to the agent loop.
 
-import std/[httpclient, json]
+import std/[httpclient, json, sets, sequtils, asyncdispatch]
 
 import talos_core/config
 import talos_core/mcp_client
@@ -174,3 +174,133 @@ proc registerMcpServers*(
   for cfg in serverCfgs:
     let tools = registerMcpServer(reg, cfg)
     result += tools.len
+
+# ---------------------------------------------------------------------------
+# SSE transport: live tool-list updates via tool_list_changed
+# ---------------------------------------------------------------------------
+
+type
+  McpServerHandle* = ref object
+    ## Bundles everything needed to keep an SSE-transport MCP server's
+    ## tools in sync and to clean up on shutdown.
+    client*: McpClient
+    streaming*: McpStreamingClient
+    registered*: seq[McpTool]
+
+proc refreshMcpServerTools*(
+    reg: ToolRegistry;
+    client: McpClient;
+    registered: var seq[McpTool];
+) =
+  ## Re-discovers tools from `client`'s server and reconciles `reg`:
+  ## unregisters tools that disappeared, (re-)registers everything the
+  ## server currently reports (covers both brand-new tools and existing
+  ## ones whose schema/description changed). Called in response to a
+  ## `tool_list_changed` SSE event.
+  ##
+  ## Synchronous and runs to completion without an `await` in the middle —
+  ## since McpSseCallback fires on the same cooperatively-scheduled event
+  ## loop as everything else, that alone is enough for this update to be
+  ## atomic from every other coroutine's point of view. No lock needed.
+  let freshTools =
+    try: client.listTools()
+    except CatchableError:
+      return  # server unreachable right now — leave the registry as-is
+
+  let freshNames = freshTools.mapIt(it.name).toHashSet()
+  let oldNames = registered.mapIt(it.name).toHashSet()
+
+  for name in oldNames:
+    if name notin freshNames and reg.has(name):
+      discard reg.unregister(name)
+
+  var newRegistered: seq[McpTool] = @[]
+  for tool in freshTools:
+    if reg.has(tool.name):
+      discard reg.unregister(tool.name)
+    try:
+      registerMcpTool(reg, tool, client)
+      newRegistered.add(tool)
+    except ToolArgumentError:
+      discard  # server sent a tool with an empty name — skip it
+  registered = newRegistered
+
+proc registerMcpServerSse*(
+    reg: ToolRegistry;
+    serverCfg: McpServerConfig;
+): McpServerHandle =
+  ## Like `registerMcpServer`, but for `transport = "sse"` servers: also
+  ## opens a persistent SSE connection (per task-07 7d, connect SSE first,
+  ## then initialize — done here as init-then-connect for simplicity since
+  ## nothing before this point depends on the SSE channel being live yet)
+  ## and keeps the registry in sync with `tool_list_changed` events for as
+  ## long as the returned handle's streaming client keeps running.
+  ##
+  ## Returns nil if the server is disabled or the initial handshake fails
+  ## (mirrors `registerMcpServer`'s "no exception, caller decides" contract).
+  if not serverCfg.enabled:
+    return nil
+
+  var client = newMcpClient(serverCfg)
+  try:
+    discard client.initialize()
+    let tools = client.listTools()
+    var registered: seq[McpTool] = @[]
+    registerMcpTools(reg, tools, client, registered)
+    result = McpServerHandle(client: client, registered: registered)
+  except CatchableError as e:
+    client.http.close()
+    stderr.writeLine("Warning: MCP server '" & serverCfg.url &
+                     "' registration failed: " & e.msg)
+    return nil
+
+  let handle = result
+  handle.streaming = newMcpStreamingClient(
+    serverCfg.url & "/sse",
+    serverCfg.authToken,
+    onEvent = proc(e: McpSseEvent) {.gcsafe, raises: [].} =
+      {.cast(gcsafe).}:
+        if e.eventType == "tool_list_changed":
+          try:
+            refreshMcpServerTools(reg, handle.client, handle.registered)
+          except CatchableError:
+            discard
+          except Exception:
+            discard
+  )
+  asyncCheck handle.streaming.run()
+
+proc registerMcpServersWithHandles*(
+    reg: ToolRegistry;
+    serverCfgs: seq[McpServerConfig];
+): tuple[toolCount: int, sseHandles: seq[McpServerHandle]] =
+  ## Like `registerMcpServers`, but dispatches each server by its
+  ## configured transport ("sse" vs. the default "http") and additionally
+  ## returns an `McpServerHandle` for every SSE server — needed to stop
+  ## its streaming connection and unregister its tools on shutdown via
+  ## `unregisterMcpServerSse`. HTTP-transport servers behave exactly as
+  ## `registerMcpServer` already did; this is purely additive, so existing
+  ## HTTP-only setups are unaffected.
+  result = (toolCount: 0, sseHandles: newSeq[McpServerHandle]())
+  for cfg in serverCfgs:
+    if cfg.transport == "sse":
+      let handle = registerMcpServerSse(reg, cfg)
+      if not handle.isNil:
+        result.sseHandles.add(handle)
+        result.toolCount += handle.registered.len
+    else:
+      let tools = registerMcpServer(reg, cfg)
+      result.toolCount += tools.len
+
+proc unregisterMcpServerSse*(reg: ToolRegistry; handle: McpServerHandle) =
+  ## Stops the SSE connection and unregisters every tool this server
+  ## contributed. Safe to call with a nil handle (e.g. registration failed).
+  if handle.isNil:
+    return
+  if not handle.streaming.isNil:
+    handle.streaming.stop()
+  for tool in handle.registered:
+    discard reg.unregister(tool.name)
+  handle.registered = @[]
+  try: handle.client.http.close()
+  except CatchableError: discard
