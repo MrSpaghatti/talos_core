@@ -20,3 +20,4 @@ tests/tbuild_llm_client
 tests/tadvisor
 tests/tagent_loop_advisor
 tests/test_agent_dispatcher
+tests/tcode_summary

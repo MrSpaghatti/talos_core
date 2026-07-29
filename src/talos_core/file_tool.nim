@@ -3,16 +3,27 @@ import file_path_validator
 import permission
 import tool_registry
 import acl
+import code_summary
 
 const MaxFileSize* = 1024 * 1024 # 1MB
 
-proc fileReadTool*(rules: FileRules): Tool =
+proc fileReadTool*(
+    rules: FileRules;
+    summarizeThresholdLines: int = DefaultSummarizeThresholdLines;
+): Tool =
   let parameters = %*{
     "type": "object",
     "properties": {
       "path": {
         "type": "string",
         "description": "Path to the file to read"
+      },
+      "full": {
+        "type": "boolean",
+        "description": "If true, always return the complete raw file. " &
+          "If false (default), a file above the summarization threshold " &
+          "is returned as a structural summary (signatures and doc " &
+          "comments, implementation bodies elided) instead of in full."
       }
     },
     "required": ["path"]
@@ -20,6 +31,7 @@ proc fileReadTool*(rules: FileRules): Tool =
 
   let execute = proc (args: JsonNode): ToolResult {.raises: [].} =
     let path = args{"path"}.getStr()
+    let full = args{"full"}.getBool(false)
     if path == "":
       return ToolResult(output: "Error: path is required", isError: true, exitCode: 1)
 
@@ -41,13 +53,33 @@ proc fileReadTool*(rules: FileRules): Tool =
         return ToolResult(output: "Error: file size exceeds maximum allowed (1MB)", isError: true, exitCode: 1)
       try:
         let content = readFile(val.resolvedPath)
-        return ToolResult(output: content, isError: false, exitCode: 0)
+        if full or lineCount(content) <= summarizeThresholdLines:
+          return ToolResult(output: content, isError: false, exitCode: 0)
+        let lang = detectLang(val.resolvedPath)
+        if lang == slUnknown:
+          # Nothing this module knows how to summarize — full content is
+          # the only option, regardless of size.
+          return ToolResult(output: content, isError: false, exitCode: 0)
+        let summary = summarizeSource(content, lang)
+        let note = "[structural summary: " & $lineCount(content) &
+          " lines shown as " & $lineCount(summary) &
+          " — call again with full=true for the complete file]\n\n"
+        return ToolResult(output: note & summary, isError: false, exitCode: 0)
       except CatchableError as e:
+        return ToolResult(output: "Error reading file: " & e.msg, isError: true, exitCode: 1)
+      # code_summary's string-building (e.g. strutils.repeat) may be flagged
+      # by Nim 2.2.x's effect analysis as raising a base Exception even
+      # though it never actually does — same footgun already documented on
+      # fileWriteTool's moveFile call below. Safety net only.
+      except Exception as e:
         return ToolResult(output: "Error reading file: " & e.msg, isError: true, exitCode: 1)
     of pathInvalid:
       return ToolResult(output: "Error: invalid path", isError: true, exitCode: 1)
 
-  result = newTool("file_read", "Read contents of a file", parameters, execute)
+  result = newTool("file_read", "Read contents of a file. Large source " &
+    "files are returned as a structural summary by default (signatures " &
+    "and doc comments, implementation bodies elided) — pass full=true " &
+    "for the complete file.", parameters, execute)
 
 proc fileWriteTool*(rules: FileRules, acl: ToolAcl): Tool =
   let parameters = %*{

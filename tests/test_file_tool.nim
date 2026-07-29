@@ -106,3 +106,80 @@ suite "File Tool":
     let res = t.execute(args)
     check res.isError == true
     check res.output.contains("exceeds")
+
+# ---------------------------------------------------------------------------
+# Suite: fileReadTool structural summarization (task-18)
+# ---------------------------------------------------------------------------
+
+proc genNimProc(n: int): string =
+  "proc genned" & $n & "*(): int =\n  var x = " & $n & "\n  x += 1\n  return x\n\n"
+
+suite "fileReadTool: structural summarization":
+  setup:
+    let sandboxDir = getCurrentDir() / "test_file_tool_summarize_sandbox"
+    createDir(sandboxDir)
+    let rules = FileRules(
+      sandboxDir: sandboxDir,
+      allowPatterns: @["*.nim", "*.txt"],
+      askPatterns: @[],
+      denyPatterns: @[],
+    )
+
+  teardown:
+    removeDir(sandboxDir)
+
+  test "a file at or below the threshold is returned in full, unchanged":
+    let path = sandboxDir / "small.nim"
+    writeFile(path, "proc small*(): int =\n  42\n")
+    let t = fileReadTool(rules, summarizeThresholdLines = 200)
+    let res = t.execute(%*{"path": path})
+    check res.isError == false
+    check res.output == "proc small*(): int =\n  42\n"
+    check not res.output.contains("structural summary")
+
+  test "a file above the threshold is returned as a structural summary by default":
+    var content = ""
+    for i in 0 ..< 20:
+      content.add(genNimProc(i))
+    let path = sandboxDir / "big.nim"
+    writeFile(path, content)
+    let t = fileReadTool(rules, summarizeThresholdLines = 10)
+    let res = t.execute(%*{"path": path})
+    check res.isError == false
+    check res.output.contains("structural summary")
+    check res.output.contains("proc genned0*(): int =")
+    check not res.output.contains("x += 1")
+
+  test "full=true bypasses summarization even for a large file":
+    var content = ""
+    for i in 0 ..< 20:
+      content.add(genNimProc(i))
+    let path = sandboxDir / "big2.nim"
+    writeFile(path, content)
+    let t = fileReadTool(rules, summarizeThresholdLines = 10)
+    let res = t.execute(%*{"path": path, "full": true})
+    check res.isError == false
+    check res.output == content
+    check res.output.contains("x += 1")
+
+  test "an unrecognized extension above the threshold is still returned in full":
+    var content = ""
+    for i in 0 ..< 20:
+      content.add("line " & $i & "\n")
+    let path = sandboxDir / "big.txt"
+    writeFile(path, content)
+    let t = fileReadTool(rules, summarizeThresholdLines = 10)
+    let res = t.execute(%*{"path": path})
+    check res.isError == false
+    check res.output == content
+
+  test "the threshold is configurable: a lower threshold summarizes a file a higher one wouldn't":
+    var content = ""
+    for i in 0 ..< 5:
+      content.add(genNimProc(i))
+    let path = sandboxDir / "medium.nim"
+    writeFile(path, content)
+    let lowThreshold = fileReadTool(rules, summarizeThresholdLines = 5)
+    let highThreshold = fileReadTool(rules, summarizeThresholdLines = 1000)
+    check lowThreshold.execute(%*{"path": path}).output.contains("structural summary")
+    check not highThreshold.execute(%*{"path": path}).output.contains("structural summary")
