@@ -127,10 +127,26 @@ proc runAdvisor*(
 # (one long-running process per session) will, which is where advisor
 # value is highest anyway (an ongoing conversation worth watching).
 
-var gPendingNotes: Table[string, string]
+const MaxPendingNotes* = 256
+  ## A note is deleted when its session's next turn takes it — but a
+  ## session that never comes back (a Discord user who wanders off, in
+  ## daemon mode) would otherwise leave its note behind forever. Cap the
+  ## table and evict oldest-inserted first; a note stale enough to be
+  ## evicted was for a conversation that stopped happening anyway.
+
+var gPendingNotes: OrderedTable[string, string]
 
 proc setPendingNote*(sessionId: string; note: string) =
   if sessionId.len == 0 or note.len == 0: return
+  # Delete before re-inserting so an updated note counts as fresh in the
+  # eviction order rather than keeping its original slot.
+  gPendingNotes.del(sessionId)
+  while gPendingNotes.len >= MaxPendingNotes:
+    var oldest = ""
+    for k in gPendingNotes.keys:
+      oldest = k
+      break
+    gPendingNotes.del(oldest)
   gPendingNotes[sessionId] = note
 
 proc takePendingNote*(sessionId: string): string =

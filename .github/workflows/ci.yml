@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        nim-version:
+          - "2.0.x"
+          - "2.2.x"
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libsqlite3-dev libpcre3-dev
+
+      - name: Setup Nim ${{ matrix.nim-version }}
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: ${{ matrix.nim-version }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # No restore-keys fallback on purpose: the monorepo's CI was bitten
+      # by a stale ~/.nimble inherited across .nimble-file changes. A
+      # .nimble change here always starts from a clean dependency set.
+      - name: Cache nimble packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nimble
+          key: nimble-${{ matrix.nim-version }}-${{ hashFiles('**/*.nimble') }}
+
+      - name: Install dependencies
+        run: nimble install -dy
+
+      - name: Test
+        run: nimble test -y
+        env:
+          CI: "true"

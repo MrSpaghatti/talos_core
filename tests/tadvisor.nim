@@ -161,3 +161,23 @@ suite "pending-note store":
     clearPendingNotes()
     check takePendingNote("x") == ""
     check takePendingNote("y") == ""
+
+  test "the store is capped: oldest note is evicted at MaxPendingNotes":
+    for i in 0 ..< MaxPendingNotes:
+      setPendingNote("session-" & $i, "note-" & $i)
+    # One past the cap evicts the oldest-inserted session, nothing else.
+    setPendingNote("session-overflow", "note-overflow")
+    check takePendingNote("session-0") == ""
+    check takePendingNote("session-1") == "note-1"
+    check takePendingNote("session-overflow") == "note-overflow"
+
+  test "re-setting a session's note refreshes its eviction slot":
+    setPendingNote("keep-me", "old")
+    for i in 0 ..< MaxPendingNotes - 1:
+      setPendingNote("filler-" & $i, "x")
+    # keep-me is now the oldest; updating it should make it the newest,
+    # so the next overflow evicts filler-0 instead.
+    setPendingNote("keep-me", "new")
+    setPendingNote("one-more", "y")
+    check takePendingNote("keep-me") == "new"
+    check takePendingNote("filler-0") == ""
