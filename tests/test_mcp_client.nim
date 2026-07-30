@@ -507,3 +507,17 @@ suite "McpStreamingClient":
     # A second connection should carry Last-Event-Id forward.
     discard waitFor client.listen().withTimeout(5000)
     check server.lastLastEventIdHeader == "evt-7"
+
+  test "newMcpStreamingClient defaults timeoutMs and accepts an override":
+    check newMcpStreamingClient("http://localhost:1").timeoutMs == DefaultMcpSseTimeoutMs
+    check newMcpStreamingClient("http://localhost:1", timeoutMs = 500).timeoutMs == 500
+
+  test "run() gives up after maxRetries consecutive failures against an unreachable server":
+    # Port 1 is a privileged port nothing listens on in these tests — the
+    # connection is refused immediately, so this stays fast without relying
+    # on the timeout path.
+    let client = newMcpStreamingClient("http://127.0.0.1:1/sse", timeoutMs = 200)
+    let ok = waitFor client.run(reconnectDelayMs = 1, maxReconnectDelayMs = 2,
+                                 maxRetries = 2).withTimeout(5000)
+    check ok
+    check client.running == false

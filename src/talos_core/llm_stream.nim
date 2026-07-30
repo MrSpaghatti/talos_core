@@ -5,7 +5,7 @@
 ## event types (`StreamEventKind`, `ChatCompletionStreamEvent`,
 ## `OnStreamEvent`) remain in `llm_client.nim` as part of the public API.
 
-import std/[json, strutils, tables, net, uri, algorithm]
+import std/[json, strutils, tables, net, uri, algorithm, os]
 import util
 import llm_client
 
@@ -182,17 +182,18 @@ proc nextLine(r: var BodyReader): tuple[line: string, hasData: bool] =
 # Streaming chat completion
 # ---------------------------------------------------------------------------
 
-proc chatCompletionStream*(
+proc chatCompletionStreamOnce(
     client: LLMClient;
     prompt: string;
     history: seq[ChatMessage] = @[];
     extraParams: Table[string, JsonNode] = initTable[string, JsonNode]();
     onEvent: OnStreamEvent;
 ): ChatResponse =
-  ## Streaming variant of chatCompletion. Sends `stream: true`, reads SSE
-  ## events via a raw socket, invokes `onEvent` for each delta, and returns
-  ## the aggregated ChatResponse. Uses the full client.timeoutMs as the
-  ## socket receive timeout.
+  ## Single-attempt streaming call — see `chatCompletionStream` for the
+  ## public, retrying entry point. Sends `stream: true`, reads SSE events
+  ## via a raw socket, invokes `onEvent` for each delta, and returns the
+  ## aggregated ChatResponse. Uses the full client.timeoutMs as the socket
+  ## receive timeout.
   var messages = history
   if prompt.len > 0:
     messages.add(ChatMessage(role: crUser, content: prompt))
@@ -304,7 +305,18 @@ proc chatCompletionStream*(
   while not sawDone:
     let (line, hasData) = reader.nextLine()
     if not hasData:
-      # EOF — stream ended without [DONE]. Treat as finish.
+      # EOF — stream ended without [DONE]. If a finish_reason already
+      # arrived, the response itself is complete and the server just
+      # skipped the redundant [DONE] sentinel — treat as a normal finish.
+      # Otherwise this is a genuine truncation (connection dropped
+      # mid-generation): silently returning the partial content as if it
+      # were the full answer would hand the caller a truncated response
+      # with no indication anything went wrong. Raise NetworkError instead
+      # so it's retryable, matching the non-streaming path's behavior on a
+      # dropped connection.
+      if result.finishReason.len == 0:
+        raise newException(NetworkError,
+          "stream ended before completion (no [DONE] or finish_reason received)")
       break
 
     if line.startsWith("data:"):
@@ -403,3 +415,49 @@ proc chatCompletionStream*(
   result.content = contentBuf
   result.toolCalls = aggregateStreamingToolCalls(toolCallDeltas)
   result.raw = %*{"streamed": true}
+
+proc chatCompletionStream*(
+    client: LLMClient;
+    prompt: string;
+    history: seq[ChatMessage] = @[];
+    extraParams: Table[string, JsonNode] = initTable[string, JsonNode]();
+    onEvent: OnStreamEvent;
+): ChatResponse =
+  ## Streaming variant of chatCompletion. Retries on NetworkError (a
+  ## connection that fails or drops before any delta reaches the caller —
+  ## including a stream that's truncated before completion, see
+  ## `chatCompletionStreamOnce`) with the same exponential backoff as
+  ## `chatCompletion`, up to `client.maxRetries` attempts.
+  ##
+  ## Once even one delta has been delivered to `onEvent`, a failure is no
+  ## longer silently retried: replaying the request would re-deliver the
+  ## same deltas from scratch, visibly duplicating/garbling whatever the
+  ## caller already rendered (e.g. a TUI showing streamed text). In that
+  ## case the error is raised immediately instead, same as before this
+  ## retry wrapper existed.
+  var attempt = 0
+  var lastErr: ref NetworkError = nil
+  while attempt < client.maxRetries:
+    inc attempt
+    var delivered = false
+    let wrappedOnEvent: OnStreamEvent =
+      if onEvent.isNil: nil
+      else:
+        proc(ev: ChatCompletionStreamEvent) {.gcsafe, raises: [].} =
+          {.cast(gcsafe).}:
+            if ev.kind in {sekContent, sekToolCallDelta}:
+              delivered = true
+            onEvent(ev)
+    try:
+      return chatCompletionStreamOnce(client, prompt, history, extraParams, wrappedOnEvent)
+    except NetworkError as e:
+      if delivered or attempt >= client.maxRetries:
+        raise e
+      lastErr = e
+      sleep(client.retryBackoffMs * (1 shl min(attempt - 1, 30)))
+
+  # Unreachable when maxRetries >= 1 (the loop always returns or raises
+  # above); kept as a typed fallback rather than an assert.
+  if lastErr != nil:
+    raise lastErr
+  raise newException(NetworkError, "chatCompletionStream failed without a recorded error")

@@ -347,6 +347,62 @@ suite "chatCompletionStream":
     check resp.toolCalls[0].arguments == "{\"cmd\": \"ls\"}"
     check resp.finishReason == "tool_calls"
 
+  test "a connection closed before anything streamed is retried transparently":
+    # First response: connection closes with an empty body — no SSE data
+    # at all, so nothing ever reaches onEvent. Second: a normal complete
+    # stream. The retry should be invisible to the caller.
+    sharedServer.enqueue("200 OK", "")
+    let ev = %*{
+      "id": "chatcmpl-retry", "model": "test-model",
+      "choices": [{
+        "index": 0, "delta": {"content": "recovered"}, "finish_reason": "stop"
+      }]
+    }
+    let body = "data: " & $ev & "\n\ndata: [DONE]\n\n"
+    sharedServer.enqueue("200 OK", body)
+    let client = makeClient(sharedServer)
+
+    var deltas: seq[string] = @[]
+    let onEvent = proc(ev: ChatCompletionStreamEvent) {.gcsafe, raises: [].} =
+      {.cast(gcsafe), cast(raises: []).}:
+        if ev.kind == sekContent:
+          deltas.add(ev.delta)
+
+    let resp = client.chatCompletionStream("say hello", onEvent = onEvent)
+    check resp.content == "recovered"
+    check deltas == @["recovered"]
+    check sharedServer.requestCount == 2
+
+  test "a stream truncated after content was already delivered raises, not retried":
+    # Content arrives, but the connection drops before [DONE] or a
+    # finish_reason — retrying here would re-deliver "partial" to onEvent
+    # a second time, visibly duplicating whatever the caller already
+    # rendered, so this must raise immediately instead.
+    let ev = %*{
+      "id": "chatcmpl-trunc", "model": "test-model",
+      "choices": [{"index": 0, "delta": {"content": "partial"}}]
+    }
+    sharedServer.enqueue("200 OK", "data: " & $ev & "\n\n")
+    let client = makeClient(sharedServer)
+
+    var deltas: seq[string] = @[]
+    let onEvent = proc(ev: ChatCompletionStreamEvent) {.gcsafe, raises: [].} =
+      {.cast(gcsafe), cast(raises: []).}:
+        if ev.kind == sekContent:
+          deltas.add(ev.delta)
+
+    expect NetworkError:
+      discard client.chatCompletionStream("say hello", onEvent = onEvent)
+    check deltas == @["partial"]
+    check sharedServer.requestCount == 1
+
+  test "maxRetries=1 does not retry a stream truncated before any content":
+    sharedServer.enqueue("200 OK", "")
+    let client = makeClient(sharedServer, maxRetries = 1)
+    expect NetworkError:
+      discard client.chatCompletionStream("say hello", onEvent = nil)
+    check sharedServer.requestCount == 1
+
 # ---------------------------------------------------------------------------
 # Malformed responses — regression guards for the AssertionDefect class:
 # `.hasKey` on a non-object JsonNode is a Defect (not a CatchableError),

@@ -406,6 +406,12 @@ type
     onEvent*: McpSseCallback
     running*: bool
     lastEventId*: string
+    timeoutMs*: int             ## connect / per-read stall timeout
+
+const
+  DefaultMcpSseTimeoutMs* = 30_000
+  DefaultMcpSseMaxRetries* = 10
+  DefaultMcpSseMaxReconnectDelayMs* = 30_000
 
 proc newSseParser*(): SseParser =
   SseParser(buf: "", evType: "", evData: @[], evId: "")
@@ -455,6 +461,7 @@ proc newMcpStreamingClient*(
     baseUrl: string;
     authToken: string = "";
     onEvent: McpSseCallback = nil;
+    timeoutMs: int = DefaultMcpSseTimeoutMs;
 ): McpStreamingClient =
   McpStreamingClient(
     http: newAsyncHttpClient(),
@@ -463,12 +470,19 @@ proc newMcpStreamingClient*(
     onEvent: onEvent,
     running: false,
     lastEventId: "",
+    timeoutMs: timeoutMs,
   )
 
 proc listen*(client: McpStreamingClient): Future[void] {.async.} =
   ## Connects to the SSE endpoint and dispatches events via `onEvent` until
   ## `stop()` is called or the connection is closed by the server. Does not
   ## reconnect on disconnect — see `run()` for a reconnecting wrapper.
+  ##
+  ## `AsyncHttpClient.timeout` is a no-op in Nim's stdlib (only the
+  ## synchronous `HttpClient` honors it), so a dead server that accepts the
+  ## connection but never responds — or stalls mid-stream — would otherwise
+  ## hang this future forever. Both the initial connect and every body read
+  ## are bounded by `client.timeoutMs` via `withTimeout` instead.
   if not client.http.isNil:
     try: client.http.close()
     except CatchableError: discard
@@ -488,11 +502,20 @@ proc listen*(client: McpStreamingClient): Future[void] {.async.} =
   if client.lastEventId.len > 0:
     client.http.headers["Last-Event-Id"] = client.lastEventId
 
-  let resp = await client.http.request(client.baseUrl, httpMethod = HttpGet)
+  let timeoutMs = if client.timeoutMs > 0: client.timeoutMs else: DefaultMcpSseTimeoutMs
+  let reqFut = client.http.request(client.baseUrl, httpMethod = HttpGet)
+  if not await reqFut.withTimeout(timeoutMs):
+    raise newException(IOError,
+      "mcp: SSE connect to '" & client.baseUrl & "' timed out after " & $timeoutMs & "ms")
+  let resp = reqFut.read()
   var parser = newSseParser()
   client.running = true
   while client.running:
-    let (hasData, chunk) = await resp.bodyStream.read()
+    let readFut = resp.bodyStream.read()
+    if not await readFut.withTimeout(timeoutMs):
+      raise newException(IOError,
+        "mcp: SSE stream '" & client.baseUrl & "' stalled (no data for " & $timeoutMs & "ms)")
+    let (hasData, chunk) = readFut.read()
     if not hasData:
       break
     for event in parser.feed(chunk):
@@ -501,17 +524,38 @@ proc listen*(client: McpStreamingClient): Future[void] {.async.} =
       if not client.onEvent.isNil:
         client.onEvent(event)
 
-proc run*(client: McpStreamingClient; reconnectDelayMs: int = 1000): Future[void] {.async.} =
+proc run*(
+    client: McpStreamingClient;
+    reconnectDelayMs: int = 1000;
+    maxReconnectDelayMs: int = DefaultMcpSseMaxReconnectDelayMs;
+    maxRetries: int = DefaultMcpSseMaxRetries;
+): Future[void] {.async.} =
   ## Runs `listen()` in a loop, reconnecting (carrying `Last-Event-Id`
   ## forward for resume) on any disconnect, until `stop()` is called.
+  ##
+  ## Reconnect delay backs off exponentially (capped at `maxReconnectDelayMs`)
+  ## and resets after any connection that reaches `listen()`'s main read loop.
+  ## After `maxRetries` consecutive failures the client gives up and stops —
+  ## without this, a permanently dead MCP server turns into an invisible
+  ## infinite retry loop with unbounded connection churn.
   client.running = true
+  var attempt = 0
+  var delay = reconnectDelayMs
   while client.running:
     try:
       await client.listen()
-    except CatchableError:
-      discard
+      attempt = 0
+      delay = reconnectDelayMs
+    except CatchableError as e:
+      inc attempt
+      if attempt > maxRetries:
+        stderr.writeLine("mcp: SSE stream '" & client.baseUrl &
+          "' giving up after " & $attempt & " failed reconnect attempts: " & e.msg)
+        client.running = false
+        break
+      delay = min(delay * 2, maxReconnectDelayMs)
     if client.running:
-      await sleepAsync(reconnectDelayMs)
+      await sleepAsync(delay)
 
 proc stop*(client: McpStreamingClient) =
   client.running = false
