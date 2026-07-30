@@ -253,8 +253,13 @@ proc newMemory*(path: string = ":memory:"): Memory =
   ## Opens (or creates) a SQLite database at `path`.
   ## Pass ":memory:" for an in-memory database (useful for tests).
   let db = open(path, "", "", "")
-  db.exec(sql"PRAGMA journal_mode=WAL")
+  # busy_timeout must be set before journal_mode: the WAL switch itself
+  # takes a lock on the database, and on a fresh connection with no
+  # timeout yet it fails instantly with SQLITE_BUSY if another connection
+  # is mid-write, instead of waiting (caught by CI's slower runners in
+  # tmemory's concurrent open test).
   db.exec(sql"PRAGMA busy_timeout=5000")
+  db.exec(sql"PRAGMA journal_mode=WAL")
   db.exec(sql"PRAGMA foreign_keys=ON")
   initSchema(db)
   result = Memory(db: db)
