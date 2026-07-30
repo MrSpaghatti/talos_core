@@ -245,6 +245,32 @@ proc initSchema(db: DbConn) =
     )
   """)
 
+  # Checkpoints (task-14): a checkpoint is just a marker anchored to the
+  # highest message id present when it was set. A rewind collapses the
+  # messages after that anchor into one summary message; the collapse is
+  # recorded in context_overrides so it survives process restarts and
+  # session resumes — getContext() consults it, getHistory() ignores it.
+  db.exec(sql"""
+    CREATE TABLE IF NOT EXISTS checkpoints (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id     TEXT    NOT NULL REFERENCES sessions(id),
+      anchor_msg_id  INTEGER NOT NULL,
+      label          TEXT    NOT NULL DEFAULT '',
+      created_at     TEXT    NOT NULL
+    )
+  """)
+
+  db.exec(sql"""
+    CREATE TABLE IF NOT EXISTS context_overrides (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id      TEXT    NOT NULL REFERENCES sessions(id),
+      start_msg_id    INTEGER NOT NULL,  -- exclusive: anchor stays visible
+      end_msg_id      INTEGER NOT NULL,  -- inclusive
+      summary_msg_id  INTEGER NOT NULL,
+      created_at      TEXT    NOT NULL
+    )
+  """)
+
 # ---------------------------------------------------------------------------
 # Constructor / destructor
 # ---------------------------------------------------------------------------
@@ -360,6 +386,105 @@ proc getHistory*(m: Memory; sessionId: string): seq[ChatMessage] =
       toolCalls:  jsonToToolCalls(row[4]),
     )
     result.add(msg)
+
+# ---------------------------------------------------------------------------
+# Checkpoints / context overrides (task-14)
+# ---------------------------------------------------------------------------
+
+proc lastMessageId*(m: Memory; sessionId: string): int64 =
+  ## The highest message id in this session, or 0 if it has no messages.
+  let row = m.db.getRow(sql"""
+    SELECT COALESCE(MAX(id), 0) FROM messages WHERE session_id = ?
+  """, sessionId)
+  parseBiggestInt(row[0])
+
+proc markCheckpoint*(m: Memory; sessionId: string; label: string = ""): int64 =
+  ## Marks a checkpoint at the current end of the session's message log.
+  ## Returns the message id the checkpoint anchors to (0 for an empty
+  ## session — a later rewind then collapses everything up to that point).
+  result = m.lastMessageId(sessionId)
+  m.db.exec(sql"""
+    INSERT INTO checkpoints (session_id, anchor_msg_id, label, created_at)
+    VALUES (?, ?, ?, ?)
+  """, sessionId, $result, label, nowIso())
+
+proc latestCheckpointAnchor*(m: Memory; sessionId: string): int64 =
+  ## The anchor message id of the most recently set checkpoint for this
+  ## session, or -1 if the session has no checkpoints.
+  let row = m.db.getRow(sql"""
+    SELECT anchor_msg_id FROM checkpoints
+    WHERE session_id = ?
+    ORDER BY id DESC LIMIT 1
+  """, sessionId)
+  if row[0].len == 0: -1 else: parseBiggestInt(row[0])
+
+proc getMessagesSince*(m: Memory; sessionId: string; anchorMsgId: int64): seq[ChatMessage] =
+  ## Returns all messages with id > `anchorMsgId`, in insertion order.
+  result = @[]
+  for row in m.db.fastRows(sql"""
+    SELECT role, content, name, tool_call_id, tool_calls
+    FROM messages
+    WHERE session_id = ? AND id > ?
+    ORDER BY id ASC
+  """, sessionId, $anchorMsgId):
+    result.add(ChatMessage(
+      role:       strToRole(row[0]),
+      content:    row[1],
+      name:       row[2],
+      toolCallId: row[3],
+      toolCalls:  jsonToToolCalls(row[4]),
+    ))
+
+proc collapseRange*(
+    m: Memory;
+    sessionId: string;
+    startMsgId, endMsgId: int64;
+    summaryContent: string;
+): int64 =
+  ## Appends `summaryContent` as a crSystem message and records a context
+  ## override collapsing (startMsgId, endMsgId] behind it. The raw messages
+  ## are NOT deleted — getHistory()/searchHistory() still see them; only
+  ## getContext() applies the collapse. Returns the summary message's id.
+  let ts = nowIso()
+  result = m.db.insertID(sql"""
+    INSERT INTO messages
+      (session_id, role, content, name, tool_call_id,
+       tool_calls, tool_results, tokens_in, tokens_out, created_at)
+    VALUES (?, 'system', ?, '', '', '[]', '[]', 0, 0, ?)
+  """, sessionId, summaryContent, ts)
+  m.db.exec(sql"""
+    INSERT INTO context_overrides
+      (session_id, start_msg_id, end_msg_id, summary_msg_id, created_at)
+    VALUES (?, ?, ?, ?, ?)
+  """, sessionId, $startMsgId, $endMsgId, $result, ts)
+  m.db.exec(sql"UPDATE sessions SET updated_at = ? WHERE id = ?", ts, sessionId)
+
+proc getContext*(m: Memory; sessionId: string): seq[ChatMessage] =
+  ## Like getHistory(), but with collapsed ranges applied: any message
+  ## falling inside a recorded context override is replaced by that
+  ## override's summary message (which sits after the range in insertion
+  ## order). This is what the agent loop sends to the LLM; getHistory()
+  ## remains the raw, nothing-hidden view used by search/replay.
+  result = @[]
+  for row in m.db.fastRows(sql"""
+    SELECT m.role, m.content, m.name, m.tool_call_id, m.tool_calls
+    FROM messages m
+    WHERE m.session_id = ?
+      AND NOT EXISTS (
+        SELECT 1 FROM context_overrides o
+        WHERE o.session_id = m.session_id
+          AND m.id > o.start_msg_id
+          AND m.id <= o.end_msg_id
+      )
+    ORDER BY m.id ASC
+  """, sessionId):
+    result.add(ChatMessage(
+      role:       strToRole(row[0]),
+      content:    row[1],
+      name:       row[2],
+      toolCallId: row[3],
+      toolCalls:  jsonToToolCalls(row[4]),
+    ))
 
 proc sanitizeFtsQuery(query: string): string =
   ## Rewrites an arbitrary search string into a valid FTS5 query by wrapping

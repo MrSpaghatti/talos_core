@@ -293,7 +293,10 @@ proc runAgentLoop*(
   if resumeSessionId.len > 0:
     if agentCfg.persist:
       memory.ensureSession(sid)
-    messages = memory.getHistory(sid)
+    # getContext, not getHistory: ranges collapsed by a checkpoint rewind
+    # (task-14) are replaced by their summary message in what the LLM
+    # sees, while the raw turns stay in SQLite for search/replay.
+    messages = memory.getContext(sid)
 
   # First turn on this session: seed the system prompt.
   if messages.len == 0 and agentCfg.systemPrompt.len > 0:
